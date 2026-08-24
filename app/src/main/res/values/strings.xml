@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MAYA</string>
+    <string name="accessibility_service_name">MAYA Automation Service</string>
+    <string name="accessibility_service_description">Allows MAYA to automatically click buttons like the Send message button in WhatsApp, open Quick Settings, notification panel, and perform screen automation.</string>
+</resources>

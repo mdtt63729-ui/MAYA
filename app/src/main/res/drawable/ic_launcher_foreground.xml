@@ -1,0 +1,97 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- ORB glow halo -->
+    <path android:pathData="M54,54m-28,0a28,28 0,1 1,56 0a28,28 0,1 1,-56 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="82"
+                android:startX="54"
+                android:startY="26"
+                android:type="radial"
+                android:gradientRadius="30">
+                <item android:color="#1A00D4FF" android:offset="0.0" />
+                <item android:color="#00000000" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- ORB sphere - outer ring (cyan) -->
+    <path
+        android:fillColor="#FF00D4FF"
+        android:pathData="M54,54m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0" />
+
+    <!-- ORB sphere - mid (purple gradient) -->
+    <path android:pathData="M54,54m-18,0a18,18 0,1 1,36 0a18,18 0,1 1,-36 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="72"
+                android:startX="54"
+                android:startY="36"
+                android:type="linear">
+                <item android:color="#FF7C4DFF" android:offset="0.0" />
+                <item android:color="#FF00D4FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- ORB sphere - inner bright core -->
+    <path android:pathData="M54,54m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="64"
+                android:startX="54"
+                android:startY="44"
+                android:type="linear">
+                <item android:color="#FFFFFFFF" android:offset="0.0" />
+                <item android:color="#FF7C4DFF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Highlight (top-left) -->
+    <path android:pathData="M48,46m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="53"
+                android:endY="51"
+                android:startX="43"
+                android:startY="41"
+                android:type="linear">
+                <item android:color="#CCFFFFFF" android:offset="0.0" />
+                <item android:color="#00FFFFFF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Sound wave ring 1 (right side) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#B200D4FF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:pathData="M76,38A20,20 0,0 1,76,70" />
+
+    <!-- Sound wave ring 2 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#8000D4FF"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round"
+        android:pathData="M82,32A28,28 0,0 1,82,76" />
+
+    <!-- Sound wave ring 3 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#5000D4FF"
+        android:strokeWidth="1.0"
+        android:strokeLineCap="round"
+        android:pathData="M88,26A36,36 0,0 1,88,82" />
+</vector>
