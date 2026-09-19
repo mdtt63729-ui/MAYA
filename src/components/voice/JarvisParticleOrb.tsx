@@ -179,12 +179,15 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
     window.addEventListener('resize', updateDimensions);
 
     // Generate particles on a mathematical Fibonacci Sphere.
-    // PERFORMANCE: phones get fewer particles (plus no shadowBlur below) so
-    // the orb stays buttery-smooth at 60fps even on budget Android devices.
+    // PERFORMANCE: phones get fewer particles + skip halos/filaments so the
+    // orb stays buttery-smooth at 60fps even on budget Android devices.
     const isTouchDevice = (() => {
       try { return window.matchMedia('(pointer: coarse)').matches; } catch { return false; }
     })();
-    const numParticles = isTouchDevice ? 520 : 880;
+    const numParticles = isTouchDevice ? 380 : 800;
+    const drawParticleHalos = !isTouchDevice;
+    const enableFilaments = !isTouchDevice;
+    const numTicks = isTouchDevice ? 72 : 120;
     const particles: Particle[] = [];
     const goldenRatio = (1 + Math.sqrt(5)) / 2;
     const goldenAngle = 2 * Math.PI * (1 - 1 / goldenRatio);
@@ -304,15 +307,8 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
       const sinY = Math.sin(rotY);
 
       // ============ 0. AMBIENT HALO ============
-      const haloR = baseRadius * 1.85;
-      const halo = ctx.createRadialGradient(centerX, centerY, baseRadius * 0.3, centerX, centerY, haloR);
-      const haloAlpha = cur.haloAlpha * (0.75 + amp * 0.6);
-      halo.addColorStop(0, `rgba(${cur.colorA[0]},${cur.colorA[1]},${cur.colorA[2]},${haloAlpha})`);
-      halo.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, haloR, 0, Math.PI * 2);
-      ctx.fill();
+      // (Rendered by the CSS glow div behind the canvas — a full-screen
+      // gradient fill here was one of the biggest per-frame costs on mobile)
 
       // ============ 1. STATE-TRANSITION SHOCKWAVES ============
       for (let i = shockwaves.length - 1; i >= 0; i--) {
@@ -469,8 +465,8 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
       // Sort by Z for true 3D depth occlusion
       projected.sort((a, b) => a.sz - b.sz);
 
-      // ============ 5. NEURAL HOLOGRAPHIC FILAMENTS (speaking / thinking) ============
-      if (cur.filament > 0.25 && (amp > 0.08 || cur.vortex > 0.2)) {
+      // ============ 5. NEURAL HOLOGRAPHIC FILAMENTS (speaking / thinking — desktop only) ============
+      if (enableFilaments && cur.filament > 0.25 && (amp > 0.08 || cur.vortex > 0.2)) {
         ctx.lineWidth = 0.8;
         const maxDistSq = 576;
         const foregroundStart = Math.max(0, projected.length - 55);
@@ -504,8 +500,8 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
         ctx.arc(pt.sx, pt.sy, pt.size, 0, Math.PI * 2);
         ctx.fill();
 
-        // Shimmering bloom halo for foreground points
-        if (pt.size > 1.8) {
+        // Shimmering bloom halo for foreground points (desktop only — mobile perf)
+        if (pt.size > 1.8 && drawParticleHalos) {
           ctx.fillStyle = pt.isPeak
             ? `rgba(${cur.colorA[0]},${cur.colorA[1]},${cur.colorA[2]},${pt.alpha * 0.65})`
             : `rgba(${cur.colorA[0]},${cur.colorA[1]},${cur.colorA[2]},${pt.alpha * 0.38})`;
@@ -517,7 +513,6 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
 
       // ============ 7. OUTER PRECISION NOTCHED PERIMETER RING ============
       const outerRingRadius = baseRadius + 2;
-      const numTicks = 120;
 
       ctx.save();
       // Layered glow ring — no shadowBlur (mobile GPU killer)
@@ -686,23 +681,24 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
 
   return (
     <div className="relative flex flex-col items-center justify-center select-none my-auto py-1">
-      {/* Background Atmospheric Ambient Glow (state-tinted) */}
+      {/* Background Atmospheric Ambient Glow — radial gradient, NO blur filter
+          (a large CSS blur behind a 60fps canvas forces the GPU to re-composite
+          the blurred layer every single frame — the main source of phone lag) */}
       <div
-        className={`absolute w-64 h-64 sm:w-72 sm:h-72 rounded-full blur-[75px] transition-all duration-700 pointer-events-none ${
+        className={`absolute w-72 h-72 sm:w-80 sm:h-80 rounded-full pointer-events-none transition-transform duration-700 ${
           isMuted
-            ? 'bg-rose-950/20 scale-95'
+            ? 'scale-95'
             : state === 'speaking'
-            ? 'bg-amber-500/25 scale-115'
+            ? 'scale-110'
             : state === 'thinking'
-            ? 'bg-violet-600/25 scale-110'
-            : state === 'searching'
-            ? 'bg-emerald-500/20 scale-105'
-            : state === 'listening'
-            ? 'bg-sky-500/20 scale-105'
-            : state === 'connecting'
-            ? 'bg-amber-400/20 animate-pulse'
-            : 'bg-cyan-950/20'
+            ? 'scale-105'
+            : state === 'listening' || state === 'searching'
+            ? 'scale-100'
+            : 'scale-90'
         }`}
+        style={{
+          background: `radial-gradient(circle, ${accent}30 0%, ${accent}14 45%, transparent 70%)`,
+        }}
       />
 
       {/* Main Interactive 3D Canvas Orb - Sized cleanly and proportionally */}

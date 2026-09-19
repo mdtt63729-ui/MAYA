@@ -79,17 +79,18 @@ export const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ state, themeCo
         const x = i * (barWidth + 3) + 6;
         const yTop = center - barHeight / 2;
 
+        // PERFORMANCE: no shadowBlur (mobile GPU killer) — a soft faded
+        // backing bar gives the glow look at a fraction of the cost
+        ctx.fillStyle = currentColors.glow;
+        ctx.fillRect(x - 1, yTop - 4, barWidth + 2, barHeight + 8);
+
         ctx.fillStyle = currentColors.main;
-        ctx.shadowColor = currentColors.glow;
-        ctx.shadowBlur = norm > 0.3 ? 12 : 4;
 
         // Rounded pill bars
         ctx.beginPath();
         ctx.roundRect(x, yTop, barWidth, barHeight, 2);
         ctx.fill();
       }
-
-      ctx.shadowBlur = 0;
     };
 
     render();
@@ -105,7 +106,7 @@ export const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ state, themeCo
         ref={canvasRef}
         width={320}
         height={64}
-        className="w-full h-16 pointer-events-none drop-shadow-md"
+        className="w-full h-16 pointer-events-none"
       />
     </div>
   );

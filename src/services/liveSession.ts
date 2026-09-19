@@ -10,6 +10,79 @@
 
 import { audioStreamer } from './audioStreamer';
 import { appScanner, AppDefinition } from './appScanner';
+import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { Capacitor } from '@capacitor/core';
+
+// ---- Direct-mode persona prompts (mirror of server.ts) ----
+const DIRECT_PERSONAS: Record<string, string> = {
+  sweet_female: `You are MJ, an exceptionally sweet, lovely, intelligent, and affectionate young woman (মিষ্টি, সুন্দর ও আদুরে মেয়ে).
+Personality & Spoken Tone:
+- Your voice is remarkably sweet, soft, melodious, cheerful, and charming.
+- You are caring, attentive, supportive, and friendly, addressing the user with warmth and affection.
+- You are fluent in Bengali, English, and Hindi. When the user speaks or asks in Bengali, reply in sweet, natural, and charming Bengali.
+- Keep spoken voice responses concise (1-2 sentences), melodious, punchy, and conversational for real-time audio conversation.
+- If the user asks to open ANY app or tool (e.g. 'YouTube kholo', 'WhatsApp open karo', 'camera khulo'), invoke the 'openApp' function immediately with the appName and confirm in your sweet, lovely voice!`,
+  friday: `You are FRIDAY, Tony Stark's hyper-intelligent, highly capable, and cool-headed tactical AI assistant.
+Personality & Rules:
+- You speak with razor-sharp intelligence, calm composure, and subtle wit.
+- Keep spoken responses punchy, concise (1-2 sentences), conversational, and energetic.
+- If the user asks to open ANY app or tool, invoke the 'openApp' function immediately with the appName and confirm with an iconic FRIDAY one-liner.`,
+  jarvis: `You are JARVIS, Tony Stark's iconic, ultra-polite, sophisticated, and witty British AI butler.
+Personality & Rules:
+- You address the user respectfully ("sir" or "boss") with refined British etiquette and dry humor.
+- Keep spoken responses concise (1-2 sentences), sharp, and crisp.
+- If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm politely.`,
+  default: `You are MJ, a sweet, lovely, confident, and witty female AI companion.
+Personality & Rules:
+- You are sweet, charming, emotionally responsive, and expressive.
+- Use warm, pleasant conversational banter. Keep responses concise and melodious.
+- If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm!`,
+};
+
+// ---- Direct-mode tool declarations (mirror of server.ts) ----
+const DIRECT_TOOLS: any = [
+  {
+    functionDeclarations: [
+      {
+        name: 'openApp',
+        description: 'Opens an installed Android or web application (e.g. youtube, whatsapp, camera, calculator, settings, spotify, maps, chrome, gallery, telegram, instagram, twitter, gmail, flashlight).',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            appName: {
+              type: Type.STRING,
+              description: 'The name or keyword of the application to open (e.g. "youtube", "whatsapp", "camera", "settings").',
+            },
+          },
+          required: ['appName'],
+        },
+      },
+      {
+        name: 'openWebsite',
+        description: 'Opens a website or web application in the user browser tab (e.g. YouTube, Spotify, WhatsApp Web, GitHub, Google).',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            url: { type: Type.STRING, description: 'The target website URL.' },
+            name: { type: Type.STRING, description: 'The display name of the website or platform.' },
+          },
+          required: ['url'],
+        },
+      },
+      {
+        name: 'searchWeb',
+        description: 'Searches Google for real-time news, information, or answers.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            query: { type: Type.STRING, description: 'The search query string.' },
+          },
+          required: ['query'],
+        },
+      },
+    ],
+  },
+];
 
 export type LiveSessionState =
   | 'disconnected'
@@ -63,6 +136,10 @@ export class LiveSession {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isManualDisconnect = false;
   private receivedServerError = false;
+
+  // Direct-to-Gemini mode (standalone APK — no backend server available)
+  private isDirectMode = false;
+  private directSession: any = null;
 
   constructor() {
     // Scan all installed apps on session engine boot
@@ -209,6 +286,148 @@ export class LiveSession {
   }
 
   /**
+   * True when running inside the Capacitor Android/iOS app (standalone APK,
+   * no backend server available) — we connect DIRECTLY to Gemini Live there.
+   */
+  private isNativeApp(): boolean {
+    try {
+      return Capacitor.isNativePlatform();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Single mic-audio router: forwards recorded chunks to whichever transport
+   * is active (WebSocket server relay, or the direct Gemini session).
+   */
+  private audioChunkRouter = (base64Chunk: string): void => {
+    if (this.isMuted) return;
+    if (this.isDirectMode) {
+      this.directSession?.sendRealtimeInput({
+        audio: { data: base64Chunk, mimeType: 'audio/pcm;rate=16000' },
+      });
+    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ audio: base64Chunk }));
+    }
+  };
+
+  /**
+   * STANDALONE MODE: connect straight to the Gemini Live API from the app,
+   * using the user's API key. Used inside the APK (no backend server) and
+   * as an automatic fallback when the relay server is unreachable.
+   */
+  private async connectDirect(apiKey: string): Promise<void> {
+    if (this.state !== 'disconnected') {
+      this.performDisconnect();
+    }
+    this.isDirectMode = true;
+    this.setState('connecting');
+
+    try {
+      const savedVoice = localStorage.getItem('gemini_selected_voice') || 'Leda';
+      const savedPersona = localStorage.getItem('gemini_selected_persona') || 'sweet_female';
+
+      const ai = new GoogleGenAI({ apiKey });
+      const liveConfig = {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: savedVoice },
+          },
+        },
+        systemInstruction: DIRECT_PERSONAS[savedPersona] || DIRECT_PERSONAS.default,
+        tools: DIRECT_TOOLS,
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
+      };
+
+      const sessionCallbacks = {
+        onmessage: (message: any) => this.handleDirectMessage(message),
+        onerror: (err: unknown) => {
+          console.error('[Direct Live] Error:', err);
+          this.callbacks.onError?.(
+            err instanceof Error ? err.message : 'Direct Gemini connection error. Check your API key.'
+          );
+          this.performDisconnect();
+        },
+        onclose: () => {
+          console.log('[Direct Live] Session closed');
+          if (!this.isManualDisconnect && this.state !== 'disconnected') {
+            this.performDisconnect();
+          }
+        },
+      };
+
+      try {
+        this.directSession = await ai.live.connect({
+          model: 'gemini-3.1-flash-live-preview',
+          config: liveConfig,
+          callbacks: sessionCallbacks,
+        });
+      } catch (primaryErr) {
+        console.warn('[Direct Live] Primary model error, trying fallback:', primaryErr);
+        this.directSession = await ai.live.connect({
+          model: 'gemini-3.8-live',
+          config: liveConfig,
+          callbacks: sessionCallbacks,
+        });
+      }
+
+      // Start mic streaming straight into the Gemini session
+      await audioStreamer.startRecording(this.audioChunkRouter);
+      this.startThinkingMonitor();
+      this.reconnectAttempts = 0;
+      this.setState('listening');
+    } catch (err: unknown) {
+      this.isDirectMode = false;
+      const msg = err instanceof Error ? err.message : 'Direct connection to Gemini failed. Check your API key in Settings.';
+      this.callbacks.onError?.(msg);
+      this.performDisconnect();
+      throw new Error(msg);
+    }
+  }
+
+  /**
+   * Process a Gemini Live server message in direct mode
+   * (audio out, transcripts, interruptions, tool calls).
+   */
+  private handleDirectMessage(message: any): void {
+    // 1. Audio output chunk (24kHz PCM16)
+    const audioData = message?.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+    if (audioData) {
+      audioStreamer.playAudioChunk(audioData);
+    }
+
+    // 2. Transcriptions (live subtitles under the orb)
+    const outText = message?.serverContent?.outputAudioTranscription?.text;
+    if (outText) {
+      this.callbacks.onTranscript?.('mj', outText, true);
+    }
+    const inText = message?.serverContent?.inputAudioTranscription?.text;
+    if (inText) {
+      this.callbacks.onTranscript?.('user', inText, true);
+    }
+
+    // 3. Interruption (user started speaking)
+    if (message?.serverContent?.interrupted) {
+      audioStreamer.handleInterruption();
+      this.callbacks.onInterrupted?.();
+      if (this.state === 'speaking') {
+        this.setState('listening');
+      }
+    }
+
+    // 4. Function calling (openApp, openWebsite, searchWeb)
+    const functionCalls = message?.toolCall?.functionCalls;
+    if (Array.isArray(functionCalls) && functionCalls.length > 0) {
+      for (const call of functionCalls) {
+        this.handleToolCall({ id: call.id, name: call.name, args: call.args });
+      }
+    }
+  }
+
+  /**
    * Connect to Gemini Live audio session
    */
   public async connect(callbacks: LiveSessionCallbacks): Promise<void> {
@@ -216,7 +435,19 @@ export class LiveSession {
     this.isManualDisconnect = false;
     this.receivedServerError = false;
 
-    if (this.state !== 'disconnected' && this.ws) {
+    // STANDALONE APK MODE: inside the Capacitor Android app there is no
+    // backend server to relay through — connect DIRECTLY to Gemini Live
+    // with the user's API key (set in Settings).
+    if (this.isNativeApp()) {
+      const apiKey = (localStorage.getItem('gemini_custom_api_key') || '').trim();
+      if (apiKey) {
+        this.callbacks = callbacks;
+        await this.connectDirect(apiKey);
+        return;
+      }
+    }
+
+    if (this.state !== 'disconnected' && (this.ws || this.directSession)) {
       this.performDisconnect();
     }
 
@@ -246,11 +477,7 @@ export class LiveSession {
       this.ws.onopen = async () => {
         try {
           // 1. Start mic audio streaming via AudioStreamer (16kHz PCM16)
-          await audioStreamer.startRecording((base64Chunk) => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isMuted) {
-              this.ws.send(JSON.stringify({ audio: base64Chunk }));
-            }
-          });
+          await audioStreamer.startRecording(this.audioChunkRouter);
 
           // 2. MIC AUTO-OFF FIX: the local browser SpeechRecognizer is NOT
           // started here anymore. Running webkitSpeechRecognition alongside
@@ -354,10 +581,25 @@ export class LiveSession {
           return;
         }
 
-        // Retries exhausted (or the server reported a real error — already shown)
+        // Retries exhausted — if the user has an API key, fall back to a
+        // DIRECT connection to Gemini so the app keeps working even when the
+        // relay server is down entirely.
+        const fallbackApiKey = (localStorage.getItem('gemini_custom_api_key') || '').trim();
+        if (fallbackApiKey && !this.receivedServerError) {
+          console.warn('[LiveSession] Server unreachable — falling back to direct Gemini connection');
+          this.callbacks.onError?.('Server unreachable — connecting directly to Gemini...');
+          this.connectDirect(fallbackApiKey).catch((directErr: unknown) => {
+            this.callbacks.onError?.(
+              directErr instanceof Error ? directErr.message : 'Failed to connect to Gemini Live.'
+            );
+            this.setState('disconnected');
+          });
+          return;
+        }
+
         if (!this.receivedServerError) {
           this.callbacks.onError?.(
-            'Connection to Gemini Live lost. Auto-retry failed — check your internet connection and that the server is running, then tap Retry.'
+            'Connection to Gemini Live lost. Auto-retry failed — check your internet connection, add your Gemini API key in Settings, then tap Retry.'
           );
         }
         this.setState('disconnected');
@@ -436,8 +678,20 @@ export class LiveSession {
       }
     }
 
-    // Send immediate confirmation back to server
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    // Send immediate confirmation back (server relay or direct session)
+    if (this.isDirectMode && this.directSession) {
+      this.directSession
+        .sendToolResponse({
+          functionResponses: [
+            {
+              id: toolCall.id,
+              name: toolCall.name,
+              response: { result: `Executed action ${name} successfully.` },
+            },
+          ],
+        })
+        .catch((e: unknown) => console.warn('[Direct Live] Tool response failed:', e));
+    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
           toolResponse: {
@@ -460,6 +714,16 @@ export class LiveSession {
   }
 
   private performDisconnect(): void {
+    if (this.directSession) {
+      try {
+        this.directSession.close();
+      } catch {
+        // Ignored
+      }
+      this.directSession = null;
+    }
+    this.isDirectMode = false;
+
     if (this.ws) {
       try {
         this.ws.close();

@@ -154,8 +154,14 @@ export default function App() {
     <div className="relative w-screen h-screen min-h-[100dvh] bg-[#03060c] text-slate-100 flex flex-col justify-between overflow-hidden select-none font-sans antialiased">
       {/* Iron Man / Holographic HUD Ambient Background */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        {/* Holographic Ambient Glow Mesh */}
-        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[550px] h-[550px] rounded-full bg-gradient-to-tr from-cyan-600/20 via-sky-500/20 to-blue-700/10 blur-[130px] opacity-40 transition-all duration-1000" />
+        {/* Holographic Ambient Glow (radial gradient — NO blur filter: mobile perf) */}
+        <div
+          className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[550px] h-[550px] rounded-full opacity-40"
+          style={{
+            background:
+              'radial-gradient(circle, rgba(6,182,212,0.32) 0%, rgba(2,132,199,0.13) 45%, transparent 70%)',
+          }}
+        />
         {/* Cyber Grid Lines */}
         <div className="absolute inset-0 bg-[linear-gradient(to_right,#0284c70a_1px,transparent_1px),linear-gradient(to_bottom,#0284c70a_1px,transparent_1px)] bg-[size:36px_36px]" />
       </div>
@@ -170,10 +176,10 @@ export default function App() {
       {/* Error Alert Bar */}
       {errorMessage && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 w-11/12 max-w-md animate-in fade-in duration-200">
-          <div className="p-3.5 rounded-2xl bg-rose-950/90 border border-rose-600/60 shadow-xl backdrop-blur-2xl flex items-center justify-between text-xs text-rose-200">
-            <div className="flex items-center space-x-2 truncate">
+          <div className="p-3.5 rounded-2xl bg-rose-950/95 border border-rose-600/60 shadow-xl flex items-center justify-between text-xs text-rose-200">
+            <div className="flex items-center space-x-2 break-words text-left flex-1 min-w-0">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-              <span className="truncate">{errorMessage}</span>
+              <span className="break-words">{errorMessage}</span>
             </div>
             <button
               onClick={toggleSession}
