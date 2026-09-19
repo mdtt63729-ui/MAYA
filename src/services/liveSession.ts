@@ -11,6 +11,7 @@
 import { audioStreamer } from './audioStreamer';
 import { appScanner, AppDefinition } from './appScanner';
 import { localCommandEngine } from './localCommandEngine';
+import { androidAgent } from './androidAgent';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { Capacitor } from '@capacitor/core';
 
@@ -40,6 +41,27 @@ Personality & Rules:
 - Reply in the SAME language he speaks, with perfect pronunciation, instantly and concisely (one short sentence).
 - If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm lovingly.`,
 };
+// ---- Shared spoken-language rules (Bengali pronunciation fix) ----
+// The Live API voice synthesizes text LITERALLY. When the model writes
+// romanized Bengali ("ami tomake bhalobashi") or digits, the TTS butchers the
+// pronunciation. These rules force native-script, spoken-style output.
+const LANGUAGE_PRONUNCIATION_RULES = `
+
+SPOKEN LANGUAGE RULES (CRITICAL — your text is synthesized to speech verbatim):
+1. When the user speaks Bengali or Banglish, you MUST write your ENTIRE reply in Bengali script (বাংলা লিপি) — NEVER romanized Bengali, NEVER English words for ordinary things. Romanized Bengali gets badly mispronounced by the voice engine.
+2. Write ALL numbers in Bengali words — "পাঁচ মিনিট", "দশটা বাজে" — never digits, because digits are read in English.
+3. Use natural, everyday spoken Bengali (খুলছি, চালু করেছি, বাড়িয়ে দিয়েছি) — not literal bookish translations.
+4. Foreign app/brand names (YouTube, WhatsApp, Chrome, Google) stay in Latin letters; everything else in the sentence stays in Bengali script.
+5. Same rules for Hindi (always Devanagari) and for English replies (natural spoken English).
+6. Keep replies ONE short sweet sentence — you are speaking, not writing an essay.`;
+
+// Append the shared spoken-language rules to EVERY persona (fixes Bengali
+// pronunciation: the voice engine mispronounces romanized Bengali and digits).
+for (const key of Object.keys(DIRECT_PERSONAS)) {
+  DIRECT_PERSONAS[key] += LANGUAGE_PRONUNCIATION_RULES;
+}
+
+
 
 // ---- Direct-mode tool declarations (mirror of server.ts) ----
 const DIRECT_TOOLS: any = [
@@ -47,13 +69,14 @@ const DIRECT_TOOLS: any = [
     functionDeclarations: [
       {
         name: 'openApp',
-        description: 'Opens an installed Android or web application (e.g. youtube, whatsapp, camera, calculator, settings, spotify, maps, chrome, gallery, telegram, instagram, twitter, gmail, flashlight).',
+        description:
+          "Opens a REAL installed Android app on the user's phone (youtube, whatsapp, facebook, camera, chrome, spotify, maps, telegram, etc). ALWAYS pass the ENGLISH app name in lowercase (e.g. 'youtube', 'whatsapp') — never Bengali script, never a URL.",
         parameters: {
           type: Type.OBJECT,
           properties: {
             appName: {
               type: Type.STRING,
-              description: 'The name or keyword of the application to open (e.g. "youtube", "whatsapp", "camera", "settings").',
+              description: "The ENGLISH name of the installed app (e.g. \"youtube\", \"whatsapp\", \"camera\", \"settings\").",
             },
           },
           required: ['appName'],
@@ -239,9 +262,98 @@ export class LiveSession {
     }
   }
 
+  // ============================================================
+  // OFFLINE MODE — orb works without internet via on-device STT
+  // + the fast local path + local TTS acknowledgements.
+  // ============================================================
+
+  private offlineMode = false;
+  private offlineListener: any = null;
+  private offlineErrorListener: any = null;
+
+  private startOfflineMode(): void {
+    this.offlineMode = true;
+    this.setState('listening');
+    try {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      if (!MJNative?.startOfflineListening) {
+        this.callbacks.onError?.('Offline mode ei build e nai jaan.');
+        this.offlineMode = false;
+        this.setState('disconnected');
+        return;
+      }
+      const language = localStorage.getItem('mj_offline_stt_lang') || 'en-IN';
+
+      this.offlineListener = MJNative.addListener?.('offlineTranscript', (data: any) => {
+        const text = (data?.text || '').toString();
+        if (!text) return;
+        const isFinal = !!data?.isFinal;
+        this.callbacks.onTranscript?.('user', text, isFinal);
+        if (isFinal) {
+          // Execute local commands instantly — no cloud round-trip possible
+          void localCommandEngine
+            .executeIfLocal(text)
+            .then((result) => {
+              if (result?.isLocalCommand) {
+                this.callbacks.onLocalCommand?.(result);
+                // Local TTS voice acknowledgement (Bengali, on-device)
+                MJNative.speakOffline?.({ text: result.feedbackText })?.catch?.(() => {});
+              } else {
+                this.callbacks.onLocalCommand?.({
+                  isLocalCommand: true,
+                  actionTaken: 'offline_hint',
+                  feedbackText: 'নেট নেই জান — অ্যাপ খোলা, টর্চ, ভলিউম, টাইমার, ব্যাটারি, কটা বাজে এই কমান্ডগুলো এখনও চলবে।',
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      });
+
+      this.offlineErrorListener = MJNative.addListener?.('offlineError', (data: any) => {
+        const msg = (data?.message || '').toString();
+        if (msg === 'permission') {
+          this.callbacks.onError?.('Microphone permission দরকার offline voice এর জন্য।');
+        } else if (msg === 'network' || msg === 'insufficient') {
+          this.callbacks.onError?.(
+            'এই ফোনে offline voice recognition support করছে না জান।'
+          );
+        }
+      });
+
+      Promise.resolve(MJNative.startOfflineListening({ language })).catch(() => {
+        this.callbacks.onError?.(
+          'এই ফোনে offline voice recognition support করছে না জান।'
+        );
+        this.stopOfflineMode();
+      });
+    } catch {
+      this.offlineMode = false;
+      this.setState('disconnected');
+    }
+  }
+
+  private stopOfflineMode(): void {
+    this.offlineMode = false;
+    try {
+      (Capacitor as any).Plugins?.MJNative?.stopOfflineListening?.()?.catch?.(() => {});
+      this.offlineListener?.remove?.();
+      this.offlineListener = null;
+      this.offlineErrorListener?.remove?.();
+      this.offlineErrorListener = null;
+    } catch {
+      // Ignored
+    }
+  }
+
   constructor() {
     // Scan all installed apps on session engine boot
     appScanner.scanInstalledApps();
+
+    // Android Agent progress → UI subtitles (through the local-command pipe)
+    androidAgent.setReportListener((msg) => {
+      this.callbacks.onLocalCommand?.({ isLocalCommand: true, actionTaken: 'agent_update', feedbackText: msg });
+    });
 
     // Synchronize speaking state from audioStreamer
     audioStreamer.onSpeakingChange((isSpeaking) => {
@@ -543,6 +655,15 @@ export class LiveSession {
     this.isManualDisconnect = false;
     this.receivedServerError = false;
 
+    // OFFLINE MODE: no network — the orb still works with LOCAL commands
+    // (app launch, torch, volume, timer, settings, back/home, time/battery).
+    // On-device speech recognition drives the same fast local path.
+    if (this.isNativeApp() && !navigator.onLine) {
+      this.callbacks = callbacks;
+      this.startOfflineMode();
+      return;
+    }
+
     // STANDALONE APK MODE: inside the Capacitor Android app there is no
     // backend server to relay through — connect DIRECTLY to Gemini Live
     // with the user's API key (set in Settings).
@@ -766,14 +887,14 @@ export class LiveSession {
           success: result.success,
         });
       } else {
-        // Fallback: try opening search or web
-        const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(appNameQuery)}`;
-        appScanner.openExternalUrl(fallbackUrl);
+        // App NOT found — NEVER fall back to a web/Google search. The user
+        // wants the real native app; opening a website instead is wrong.
+        // Report honestly so MJ can say she couldn't find it.
         this.callbacks.onAppAction?.({
           appName: appNameQuery,
-          actionType: 'web_search',
-          url: fallbackUrl,
-          success: true,
+          actionType: 'app_not_found',
+          url: '',
+          success: false,
         });
       }
     } else if (name === 'openWebsite') {
@@ -840,6 +961,10 @@ export class LiveSession {
   private performDisconnect(): void {
     this.stopVoiceService();
 
+    if (this.offlineMode) {
+      this.stopOfflineMode();
+    }
+
     if (this.directSession) {
       try {
         this.directSession.close();
@@ -895,6 +1020,15 @@ export class LiveSession {
       }
       this.state = newState;
       this.callbacks.onStateChange(newState);
+
+      // Sync the floating orb overlay with the session state (rainbow pulse)
+      try {
+        if (Capacitor.isNativePlatform()) {
+          (Capacitor as any).Plugins?.MJNative?.setOverlayState?.({ state: newState })?.catch?.(() => {});
+        }
+      } catch {
+        // Overlay is optional — never break the session over it
+      }
     }
   }
 }

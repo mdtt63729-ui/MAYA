@@ -54,6 +54,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   // App Scanner State
   const [appSearch, setAppSearch] = useState<string>('');
   const [apps, setApps] = useState<AppDefinition[]>([]);
+  const [isScanningApps, setIsScanningApps] = useState<boolean>(false);
   const [launchFeedback, setLaunchFeedback] = useState<string | null>(null);
 
   // Hardware Diagnostics State
@@ -69,9 +70,16 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
       setApps(appScanner.getAllApps());
       // NATIVE: rescan the phone's installed apps (names + logos) so the
       // Apps list is always current when Settings opens
-      appScanner.refreshNativeApps().then(() => {
-        setApps(appScanner.getAllApps());
-      });
+      if (Capacitor.isNativePlatform()) {
+        setIsScanningApps(true);
+        appScanner
+          .refreshNativeApps()
+          .then(() => {
+            setApps(appScanner.getAllApps());
+          })
+          .catch(() => {})
+          .finally(() => setIsScanningApps(false));
+      }
       const savedKey = localStorage.getItem('gemini_custom_api_key') || '';
       setApiKey(savedKey);
       const savedVoice = localStorage.getItem('gemini_selected_voice') || 'Leda';
@@ -344,7 +352,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
             <div className="flex p-1 bg-black/50 border border-white/10 rounded-2xl my-3 shrink-0 text-[11px] font-mono overflow-x-auto scrollbar-none">
               <button
                 onClick={() => setActiveTab('api')}
-                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all active:scale-[0.96] ${
                   activeTab === 'api'
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                     : 'text-slate-400 hover:text-white'
@@ -354,7 +362,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
               </button>
               <button
                 onClick={() => setActiveTab('defaultApp')}
-                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all active:scale-[0.96] ${
                   activeTab === 'defaultApp'
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                     : 'text-slate-400 hover:text-white'
@@ -364,7 +372,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
               </button>
               <button
                 onClick={() => setActiveTab('voice')}
-                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all active:scale-[0.96] ${
                   activeTab === 'voice'
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                     : 'text-slate-400 hover:text-white'
@@ -374,7 +382,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
               </button>
               <button
                 onClick={() => setActiveTab('hardware')}
-                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all active:scale-[0.96] ${
                   activeTab === 'hardware'
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                     : 'text-slate-400 hover:text-white'
@@ -384,7 +392,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
               </button>
               <button
                 onClick={() => setActiveTab('apps')}
-                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all ${
+                className={`flex-1 py-1.5 px-2 rounded-xl whitespace-nowrap transition-all active:scale-[0.96] ${
                   activeTab === 'apps'
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                     : 'text-slate-400 hover:text-white'
@@ -394,8 +402,17 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
               </button>
             </div>
 
-            {/* Tab Content */}
-            <div className="overflow-y-auto space-y-4 py-2 scrollbar-none flex-1">
+            {/* Tab Content — premium page-change animation */}
+            <div className="overflow-y-auto scrollbar-none flex-1">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeTab}
+                initial={{ opacity: 0, x: 26, scale: 0.99 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                exit={{ opacity: 0, x: -26, scale: 0.99 }}
+                transition={{ type: 'spring', damping: 30, stiffness: 400 }}
+                className="space-y-4 py-2"
+              >
               {/* TAB 1: API & CODEC */}
               {activeTab === 'api' && (
                 <div className="space-y-4">
@@ -762,6 +779,19 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
                     </div>
                   )}
 
+                  {isScanningApps && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-center space-x-2 py-2 text-[11px] font-mono text-cyan-300">
+                        <div className="w-4 h-4 rounded-full border-2 border-cyan-500/25 border-t-cyan-400 animate-spin" />
+                        <span>Scanning your phone's apps...</span>
+                      </div>
+                      {[0, 1, 2].map((i) => (
+                        <div key={i} className="mj-skeleton h-12 rounded-xl" />
+                      ))}
+                    </div>
+                  )}
+
+                  {!isScanningApps && (
                   <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto scrollbar-none">
                     {filteredApps.map((app) => (
                       <div
@@ -794,8 +824,11 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
                       </div>
                     ))}
                   </div>
+                  )}
                 </div>
               )}
+              </motion.div>
+            </AnimatePresence>
             </div>
 
             {/* Bottom Done Button */}

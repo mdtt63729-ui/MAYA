@@ -269,7 +269,10 @@ export class AppScanner {
    */
   public findApp(query: string): AppDefinition | null {
     if (!query) return null;
-    const clean = query.trim().toLowerCase();
+    let clean = query.trim().toLowerCase();
+
+    // 0. Bengali app names → canonical id (user speaks Bengali — must match!)
+    clean = AppScanner.BENGALI_ALIASES[clean] || clean;
 
     // 1. Direct match
     if (this.installedApps.has(clean)) {
@@ -283,8 +286,73 @@ export class AppScanner {
       }
     }
 
+    // 2b. Bengali substring (e.g. "ইউটিউবটা" contains "ইউটিউব")
+    for (const [bKey, id] of Object.entries(AppScanner.BENGALI_ALIASES)) {
+      if (clean.includes(bKey)) {
+        const app = this.installedApps.get(id);
+        if (app) return app;
+      }
+    }
+
+    // 3. Fuzzy word-overlap match (e.g. "you tube", "the youtube app", "whats app")
+    const qWords = clean
+      .replace(/[^a-z0-9\u0980-\u09FF]+/g, ' ')
+      .split(' ')
+      .filter((w) => w.length > 2);
+    let best: { app: AppDefinition; score: number } | null = null;
+    for (const [key, app] of this.installedApps.entries()) {
+      const kWords = key
+        .replace(/[^a-z0-9\u0980-\u09FF]+/g, ' ')
+        .split(' ')
+        .filter((w) => w.length > 2);
+      let score = 0;
+      for (const qw of qWords) {
+        for (const kw of kWords) {
+          if (qw === kw) score += 2;
+          else if (qw.length > 3 && kw.length > 2 && (qw.startsWith(kw) || kw.startsWith(qw))) score += 1;
+        }
+      }
+      if (score > 0 && (!best || score > best.score)) best = { app, score };
+    }
+    if (best && best.score >= 2) return best.app;
+
     return null;
   }
+
+  /** Bengali-spoken app names → canonical registry ids. */
+  private static readonly BENGALI_ALIASES: Record<string, string> = {
+    'ইউটিউব': 'youtube',
+    'ইউটিউব মিউজিক': 'youtube',
+    'হোয়াটসঅ্যাপ': 'whatsapp',
+    'হোয়াটসএপ': 'whatsapp',
+    'হোয়াটস্যাপ': 'whatsapp',
+    'ফেসবুক': 'facebook',
+    'মেসেঞ্জার': 'messenger',
+    'ইনস্টাগ্রাম': 'instagram',
+    'ক্যামেরা': 'camera',
+    'ক্রোম': 'chrome',
+    'গুগল': 'google',
+    'জিমেইল': 'gmail',
+    'ম্যাপ': 'maps',
+    'গুগল ম্যাপ': 'maps',
+    'টেলিগ্রাম': 'telegram',
+    'স্ন্যাপচ্যাট': 'snapchat',
+    'স্পটিফাই': 'spotify',
+    'গানা': 'gaana',
+    'গ্যালারি': 'gallery',
+    'ফটো': 'gallery',
+    'ছবি': 'gallery',
+    'ঘড়ি': 'clock',
+    'ক্যালকুলেটর': 'calculator',
+    'ক্যালেন্ডার': 'calendar',
+    'প্লে স্টোর': 'playstore',
+    'প্লেস্টোর': 'playstore',
+    'সেটিংস': 'settings',
+    'ফোন': 'phone',
+    'ডায়ালার': 'phone',
+    'মেসেজ': 'messages',
+    'এসএমএস': 'messages',
+  };
 
   /**
    * Launch application — on Android it opens the REAL installed app,

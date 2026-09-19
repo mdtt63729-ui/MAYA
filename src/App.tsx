@@ -11,6 +11,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { liveSession, LiveSessionState, AppActionPayload } from './services/liveSession';
 import { appScanner } from './services/appScanner';
 import { LocalCommandResult } from './services/localCommandEngine';
@@ -46,6 +47,21 @@ export default function App() {
     const isCompleted = localStorage.getItem('mj_onboarding_completed_v2');
     if (!isCompleted) {
       setIsOnboardingOpen(true);
+    }
+
+    // Floating Orb overlay: auto-start on launch if the user turned it on
+    // before and the overlay permission is granted.
+    if (Capacitor.isNativePlatform() && localStorage.getItem('mj_floating_orb') === 'true') {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      if (MJNative?.startOverlay) {
+        MJNative.isOverlayEnabled?.()
+          .then((r: any) => {
+            if (r?.granted) {
+              MJNative.startOverlay().catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
     }
 
     // One-time upgrade: default MJ to the sweet girl voice (Leda)

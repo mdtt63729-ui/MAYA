@@ -78,39 +78,102 @@ jobs:
 
               @PluginMethod
               public void getInstalledApps(PluginCall call) {
-                  JSArray apps = new JSArray();
-                  try {
-                      PackageManager pm = getContext().getPackageManager();
-                      Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
-                      mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
-                      List<ResolveInfo> activities = pm.queryIntentActivities(mainIntent, 0);
-                      for (ResolveInfo ri : activities) {
+                  // Rasterizing hundreds of app icons on the UI thread causes ANRs
+                  // on low-end phones (the "apps never scanned" bug) — so the
+                  // whole scan runs on a background worker and resolves from there.
+                  Thread worker = new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          JSArray apps = new JSArray();
                           try {
-                              JSObject app = new JSObject();
-                              app.put("id", ri.activityInfo.packageName);
-                              app.put("name", ri.loadLabel(pm).toString());
-                              app.put("packageName", ri.activityInfo.packageName);
-                              Drawable icon = ri.activityInfo.loadIcon(pm);
-                              if (icon != null) {
-                                  int size = Math.min(96, Math.max(48, icon.getIntrinsicWidth()));
-                                  Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-                                  Canvas canvas = new Canvas(bmp);
-                                  icon.setBounds(0, 0, size, size);
-                                  icon.draw(canvas);
-                                  ByteArrayOutputStream out = new ByteArrayOutputStream();
-                                  bmp.compress(Bitmap.CompressFormat.PNG, 80, out);
-                                  app.put("icon", "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP));
+                              PackageManager pm = getContext().getPackageManager();
+                              Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
+                              mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+                              List<ResolveInfo> activities = pm.queryIntentActivities(mainIntent, 0);
+                              for (ResolveInfo ri : activities) {
+                                  try {
+                                      JSObject app = new JSObject();
+                                      app.put("id", ri.activityInfo.packageName);
+                                      app.put("name", ri.loadLabel(pm).toString());
+                                      app.put("packageName", ri.activityInfo.packageName);
+                                      Drawable icon = ri.activityInfo.loadIcon(pm);
+                                      if (icon != null) {
+                                          int size = 48;
+                                          Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                                          Canvas canvas = new Canvas(bmp);
+                                          icon.setBounds(0, 0, size, size);
+                                          icon.draw(canvas);
+                                          ByteArrayOutputStream out = new ByteArrayOutputStream();
+                                          bmp.compress(Bitmap.CompressFormat.PNG, 70, out);
+                                          app.put("icon", "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP));
+                                      }
+                                      apps.put(app);
+                                  } catch (Exception ignored) {
+                                  }
                               }
-                              apps.put(app);
-                          } catch (Exception ignored) {
+                          } catch (Exception e) {
+                              try { call.reject("Failed to scan apps: " + e.getMessage()); } catch (Exception ignored) {}
+                              return;
+                          }
+                          JSObject ret = new JSObject();
+                          ret.put("apps", apps);
+                          call.resolve(ret);
+                      }
+                  });
+                  worker.setName("mj-app-scan");
+                  worker.setPriority(Thread.NORM_PRIORITY - 1);
+                  worker.start();
+              }
+
+              // ---------------- PERMISSION CENTER (onboarding) ----------------
+
+              /** Triggers the real Android runtime permission popups (mic + notifications). */
+              @PluginMethod
+              public void requestRuntimePermissions(PluginCall call) {
+                  try {
+                      android.app.Activity activity = getActivity();
+                      if (activity != null && Build.VERSION.SDK_INT >= 23) {
+                          java.util.List<String> wanted = new java.util.ArrayList<String>();
+                          if (getContext().checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                                  != PackageManager.PERMISSION_GRANTED) {
+                              wanted.add(android.Manifest.permission.RECORD_AUDIO);
+                          }
+                          if (Build.VERSION.SDK_INT >= 33
+                                  && getContext().checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                                  != PackageManager.PERMISSION_GRANTED) {
+                              wanted.add("android.permission.POST_NOTIFICATIONS");
+                          }
+                          if (!wanted.isEmpty()) {
+                              activity.requestPermissions(wanted.toArray(new String[0]), 4711);
                           }
                       }
+                      call.resolve();
                   } catch (Exception e) {
-                      call.reject("Failed to scan apps: " + e.getMessage());
-                      return;
+                      call.reject(e.getMessage());
                   }
+              }
+
+              /** Live status of every permission the onboarding Permission Center shows. */
+              @PluginMethod
+              public void getPermissionStatus(PluginCall call) {
                   JSObject ret = new JSObject();
-                  ret.put("apps", apps);
+                  try {
+                      ret.put("mic", getContext().checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                              == PackageManager.PERMISSION_GRANTED);
+                      boolean notif = true;
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          notif = getContext().checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                                  == PackageManager.PERMISSION_GRANTED;
+                      }
+                      ret.put("notifications", notif);
+                      ret.put("overlay", Settings.canDrawOverlays(getContext()));
+                      ret.put("accessibility", MJAccessibilityService.isServiceEnabled(getContext()));
+                  } catch (Exception e) {
+                      ret.put("mic", false);
+                      ret.put("notifications", false);
+                      ret.put("overlay", false);
+                      ret.put("accessibility", false);
+                  }
                   call.resolve(ret);
               }
 
@@ -316,6 +379,338 @@ jobs:
                   ret.put("accessibilityEnabled", MJAccessibilityService.isServiceEnabled(getContext()));
                   call.resolve(ret);
               }
+
+              // ---------------- ANDROID AGENT (Accessibility screen control) ----------------
+
+              /**
+               * Unified screen-automation endpoint.
+               * action: find | click | type | scroll | read
+               *   find   — matchText/matchDesc/editable/clickable/excludeEditable, waits up to timeoutMs
+               *   click  — finds then clicks (ancestor walk + gesture fallback)
+               *   type   — finds an editable node and sets its text (read-back in "text")
+               *   scroll — value "down"/"up"
+               *   read   — returns visible texts
+               */
+              @PluginMethod
+              public void screenAction(PluginCall call) {
+                  if (!MJAccessibilityService.isServiceEnabled(getContext())) {
+                      call.reject("Accessibility service is not enabled. Enable it in Android Settings.");
+                      return;
+                  }
+                  final String action = call.getString("action", "find");
+                  final String matchText = call.getString("matchText");
+                  final String matchDesc = call.getString("matchDesc");
+                  final String value = call.getString("value");
+                  final boolean editable = Boolean.TRUE.equals(call.getBoolean("editable", false));
+                  final boolean clickable = Boolean.TRUE.equals(call.getBoolean("clickable", false));
+                  final boolean excludeEditable = Boolean.TRUE.equals(call.getBoolean("excludeEditable", false));
+                  Integer timeoutBoxed = call.getInt("timeoutMs", 6000);
+                  final int timeoutMs = timeoutBoxed == null ? 6000 : timeoutBoxed;
+                  final long deadline = System.currentTimeMillis() + timeoutMs;
+
+                  Thread worker = new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              if ("read".equals(action)) {
+                                  java.util.List<String> texts = MJAccessibilityService.collectVisibleTexts();
+                                  JSArray arr = new JSArray();
+                                  for (String t : texts) arr.put(t);
+                                  JSObject ret = new JSObject();
+                                  ret.put("texts", arr);
+                                  call.resolve(ret);
+                                  return;
+                              }
+                              if ("scroll".equals(action)) {
+                                  boolean down = "down".equals(value);
+                                  boolean ok = MJAccessibilityService.scrollScreen(down);
+                                  JSObject ret = new JSObject();
+                                  ret.put("found", ok);
+                                  ret.put("success", ok);
+                                  call.resolve(ret);
+                                  return;
+                              }
+                              android.view.accessibility.AccessibilityNodeInfo node = null;
+                              while (System.currentTimeMillis() < deadline) {
+                                  node = MJAccessibilityService.findNodeByQuery(matchText, matchDesc, editable, clickable, excludeEditable);
+                                  if (node != null) break;
+                                  try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                              }
+                              JSObject ret = new JSObject();
+                              if (node == null) {
+                                  ret.put("found", false);
+                                  ret.put("success", false);
+                                  call.resolve(ret);
+                                  return;
+                              }
+                              if ("find".equals(action)) {
+                                  ret.put("found", true);
+                                  ret.put("success", true);
+                                  ret.put("text", node.getText() == null ? "" : node.getText().toString());
+                                  call.resolve(ret);
+                              } else if ("click".equals(action)) {
+                                  boolean ok = MJAccessibilityService.clickNode(node);
+                                  ret.put("found", true);
+                                  ret.put("success", ok);
+                                  call.resolve(ret);
+                              } else if ("type".equals(action)) {
+                                  String v = value == null ? "" : value;
+                                  boolean ok = MJAccessibilityService.setNodeText(node, v);
+                                  ret.put("found", true);
+                                  ret.put("success", ok);
+                                  ret.put("text", v);
+                                  call.resolve(ret);
+                              } else {
+                                  call.reject("Unknown action");
+                              }
+                          } catch (Exception e) {
+                              try { call.reject(e.getMessage()); } catch (Exception ignored) {}
+                          }
+                      }
+                  });
+                  worker.setName("mj-screen-action");
+                  worker.start();
+              }
+
+              // ---------------- FLOATING ORB OVERLAY ----------------
+
+              @PluginMethod
+              public void isOverlayEnabled(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  try {
+                      ret.put("granted", Settings.canDrawOverlays(getContext()));
+                  } catch (Exception e) {
+                      ret.put("granted", false);
+                  }
+                  call.resolve(ret);
+              }
+
+              @PluginMethod
+              public void openOverlaySettings(PluginCall call) {
+                  try {
+                      Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              android.net.Uri.parse("package:" + getContext().getPackageName()));
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      getContext().startActivity(i);
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void startOverlay(PluginCall call) {
+                  if (!Settings.canDrawOverlays(getContext())) {
+                      call.reject("Overlay permission not granted");
+                      return;
+                  }
+                  try {
+                      getContext().startService(new Intent(getContext(), MJOverlayService.class));
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void stopOverlay(PluginCall call) {
+                  try {
+                      getContext().stopService(new Intent(getContext(), MJOverlayService.class));
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void setOverlayState(PluginCall call) {
+                  String s = call.getString("state");
+                  MJOverlayService.setAgentState(s);
+                  call.resolve();
+              }
+
+              // ---------------- OFFLINE MODE (on-device STT + TTS) ----------------
+
+              private android.speech.SpeechRecognizer offlineRecognizer;
+              private volatile boolean offlineListeningActive = false;
+              private android.speech.tts.TextToSpeech offlineTts;
+              private volatile boolean ttsReady = false;
+
+              private android.content.Intent buildOfflineIntent(String language) {
+                  android.content.Intent intent = new android.content.Intent(
+                          android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                  intent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                          android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                  intent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, language);
+                  intent.putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      intent.putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+                  }
+                  return intent;
+              }
+
+              private void restartOffline(final String language) {
+                  if (!offlineListeningActive) return;
+                  final android.speech.SpeechRecognizer r = offlineRecognizer;
+                  new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (!offlineListeningActive || offlineRecognizer == null || offlineRecognizer != r) return;
+                          try {
+                              offlineRecognizer.startListening(buildOfflineIntent(language));
+                          } catch (Exception ignored) {
+                          }
+                      }
+                  }, 300);
+              }
+
+              private String mapSttError(int error) {
+                  switch (error) {
+                      case android.speech.SpeechRecognizer.ERROR_NO_MATCH: return "no_match";
+                      case android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "timeout";
+                      case android.speech.SpeechRecognizer.ERROR_NETWORK:
+                      case android.speech.SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "network";
+                      case android.speech.SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "permission";
+                      default: return "error_" + error;
+                  }
+              }
+
+              /**
+               * Continuous ON-DEVICE speech recognition (works with no network
+               * when the language pack is installed). Fires the plugin events:
+               *   offlineTranscript { text, isFinal }
+               *   offlineError { message }
+               */
+              @PluginMethod
+              public void startOfflineListening(PluginCall call) {
+                  final String language = call.getString("language", "en-IN");
+                  final android.app.Activity activity = getActivity();
+                  if (activity == null) {
+                      call.reject("No activity");
+                      return;
+                  }
+                  if (!android.speech.SpeechRecognizer.isRecognitionAvailable(getContext())) {
+                      call.reject("Speech recognition is not available on this device");
+                      return;
+                  }
+                  activity.runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              if (offlineRecognizer != null) {
+                                  try { offlineRecognizer.destroy(); } catch (Exception ignored) { }
+                                  offlineRecognizer = null;
+                              }
+                              offlineListeningActive = true;
+                              offlineRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(getContext());
+                              offlineRecognizer.setRecognitionListener(new android.speech.RecognitionListener() {
+                                  @Override public void onReadyForSpeech(android.os.Bundle params) { }
+                                  @Override public void onBeginningOfSpeech() { }
+                                  @Override public void onRmsChanged(float rmsdB) { }
+                                  @Override public void onBufferReceived(byte[] buffer) { }
+                                  @Override public void onEndOfSpeech() { }
+                                  @Override
+                                  public void onError(int error) {
+                                      String msg = mapSttError(error);
+                                      if (!"no_match".equals(msg) && !"timeout".equals(msg)) {
+                                          JSObject d = new JSObject();
+                                          d.put("message", msg);
+                                          notifyListeners("offlineError", d);
+                                      }
+                                      restartOffline(language);
+                                  }
+                                  @Override
+                                  public void onResults(android.os.Bundle results) {
+                                      java.util.ArrayList<String> list = results.getStringArrayList(
+                                              android.speech.SpeechRecognizer.RESULTS_RECOGNITION);
+                                      if (list != null && !list.isEmpty() && list.get(0) != null && list.get(0).length() > 0) {
+                                          JSObject d = new JSObject();
+                                          d.put("text", list.get(0));
+                                          d.put("isFinal", true);
+                                          notifyListeners("offlineTranscript", d);
+                                      }
+                                      restartOffline(language);
+                                  }
+                                  @Override
+                                  public void onPartialResults(android.os.Bundle partialResults) {
+                                      java.util.ArrayList<String> list = partialResults.getStringArrayList(
+                                              android.speech.SpeechRecognizer.RESULTS_RECOGNITION);
+                                      if (list != null && !list.isEmpty() && list.get(0) != null && list.get(0).length() > 0) {
+                                          JSObject d = new JSObject();
+                                          d.put("text", list.get(0));
+                                          d.put("isFinal", false);
+                                          notifyListeners("offlineTranscript", d);
+                                      }
+                                  }
+                                  @Override public void onEvent(int eventType, android.os.Bundle params) { }
+                              });
+                              offlineRecognizer.startListening(buildOfflineIntent(language));
+                              call.resolve();
+                          } catch (Exception e) {
+                              call.reject(e.getMessage());
+                          }
+                      }
+                  });
+              }
+
+              @PluginMethod
+              public void stopOfflineListening(PluginCall call) {
+                  offlineListeningActive = false;
+                  final android.speech.SpeechRecognizer r = offlineRecognizer;
+                  offlineRecognizer = null;
+                  if (r != null) {
+                  	try {
+                  		getActivity().runOnUiThread(new Runnable() {
+                  			@Override
+                  			public void run() {
+                  				try {
+                  					r.stopListening();
+                  					r.destroy();
+                  				} catch (Exception ignored) {
+                  				}
+                  			}
+                  		});
+                  	} catch (Exception ignored) {
+                  	}
+                  }
+                  call.resolve();
+              }
+
+              /** Local TTS voice acknowledgement (Bengali when the engine supports it). */
+              @PluginMethod
+              public void speakOffline(PluginCall call) {
+                  String text = call.getString("text", "");
+                  if (text == null || text.length() == 0) {
+                      call.resolve();
+                      return;
+                  }
+                  try {
+                      if (offlineTts == null) {
+                          offlineTts = new android.speech.tts.TextToSpeech(getContext(),
+                                  new android.speech.tts.TextToSpeech.OnInitListener() {
+                                      @Override
+                                      public void onInit(int status) {
+                                          if (status == android.speech.tts.TextToSpeech.SUCCESS) {
+                                              ttsReady = true;
+                                              try {
+                                                  int r = offlineTts.setLanguage(new java.util.Locale("bn", "IN"));
+                                                  if (r == android.speech.tts.TextToSpeech.LANG_MISSING_DATA) {
+                                                      offlineTts.setLanguage(new java.util.Locale("en", "IN"));
+                                                  }
+                                              } catch (Exception ignored) {
+                                              }
+                                          }
+                                      }
+                                  });
+                      }
+                      if (ttsReady) {
+                          offlineTts.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null,
+                                  "mj_offline_" + System.currentTimeMillis());
+                      }
+                  } catch (Exception ignored) {
+                  }
+                  call.resolve();
+              }
           }
           JAVAEOF
 
@@ -327,6 +722,7 @@ jobs:
           import android.content.Intent;
           import android.provider.Settings;
           import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
 
           /**
            * MJ Accessibility Service — foundation of the Android Agent.
@@ -404,6 +800,156 @@ jobs:
                   intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                   ctx.startActivity(intent);
               }
+
+              // ---------------- ANDROID AGENT: node tree inspection & interaction ----------------
+
+              /**
+               * Finds a node by contained text or contentDescription.
+               * requireEditable / requireClickable constrain the match;
+               * excludeEditable skips text fields (used for picking suggestions).
+               */
+              public static AccessibilityNodeInfo findNodeByQuery(
+                      String matchText, String matchDesc,
+                      boolean requireEditable, boolean requireClickable, boolean excludeEditable) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return null;
+                  AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+                  if (root == null) return null;
+                  return findInTree(root, matchText, matchDesc, requireEditable, requireClickable, excludeEditable);
+              }
+
+              private static boolean nodeMatches(
+                      AccessibilityNodeInfo n, String matchText, String matchDesc,
+                      boolean requireEditable, boolean requireClickable, boolean excludeEditable) {
+                  if (requireEditable && !n.isEditable()) return false;
+                  if (requireClickable && !n.isClickable()) return false;
+                  if (excludeEditable && n.isEditable()) return false;
+                  String ts = n.getText() == null ? "" : n.getText().toString().toLowerCase().trim();
+                  String ds = n.getContentDescription() == null ? "" : n.getContentDescription().toString().toLowerCase().trim();
+                  if (matchDesc != null && matchDesc.length() > 0) return ds.contains(matchDesc.toLowerCase());
+                  if (matchText != null && matchText.length() > 0) {
+                      return ts.contains(matchText.toLowerCase()) || ds.contains(matchText.toLowerCase());
+                  }
+                  return ts.length() > 0 || ds.length() > 0;
+              }
+
+              private static AccessibilityNodeInfo findInTree(
+                      AccessibilityNodeInfo node, String matchText, String matchDesc,
+                      boolean requireEditable, boolean requireClickable, boolean excludeEditable) {
+                  if (nodeMatches(node, matchText, matchDesc, requireEditable, requireClickable, excludeEditable)) return node;
+                  for (int i = 0; i < node.getChildCount(); i++) {
+                      AccessibilityNodeInfo child = node.getChild(i);
+                      if (child == null) continue;
+                      AccessibilityNodeInfo found = findInTree(child, matchText, matchDesc, requireEditable, requireClickable, excludeEditable);
+                      if (found != null) return found;
+                  }
+                  return null;
+              }
+
+              /** Click via ACTION_CLICK, walking up to clickable ancestors; gesture-tap fallback. */
+              public static boolean clickNode(AccessibilityNodeInfo node) {
+                  AccessibilityNodeInfo current = node;
+                  for (int depth = 0; depth < 6 && current != null; depth++) {
+                      if (current.isClickable() && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
+                      current = current.getParent();
+                  }
+                  return gestureTapAtNode(node);
+              }
+
+              /** Sets text via ACTION_SET_TEXT (replaces existing content). */
+              public static boolean setNodeText(AccessibilityNodeInfo node, String value) {
+                  android.os.Bundle args = new android.os.Bundle();
+                  args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
+                  return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+              }
+
+              /** Scrolls the first scrollable node forward/backward; gesture-swipe fallback. */
+              public static boolean scrollScreen(boolean forward) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return false;
+                  AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+                  if (root == null) return false;
+                  AccessibilityNodeInfo scrollable = findScrollable(root);
+                  if (scrollable != null) {
+                      if (scrollable.performAction(forward
+                              ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                              : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) return true;
+                  }
+                  return gestureSwipe(forward);
+              }
+
+              private static AccessibilityNodeInfo findScrollable(AccessibilityNodeInfo node) {
+                  if (node.isScrollable()) return node;
+                  for (int i = 0; i < node.getChildCount(); i++) {
+                      AccessibilityNodeInfo child = node.getChild(i);
+                      if (child == null) continue;
+                      AccessibilityNodeInfo found = findScrollable(child);
+                      if (found != null) return found;
+                  }
+                  return null;
+              }
+
+              /** Collects visible texts + content descriptions (capped) for screen reading. */
+              public static java.util.List<String> collectVisibleTexts() {
+                  java.util.List<String> out = new java.util.ArrayList<String>();
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return out;
+                  AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+                  if (root == null) return out;
+                  collectTexts(root, out, 0);
+                  return out;
+              }
+
+              private static void collectTexts(AccessibilityNodeInfo node, java.util.List<String> out, int depth) {
+                  if (depth > 25 || out.size() >= 80) return;
+                  CharSequence t = node.getText();
+                  CharSequence d = node.getContentDescription();
+                  if (t != null && t.toString().trim().length() > 0) out.add(t.toString().trim());
+                  else if (d != null && d.toString().trim().length() > 0) out.add(d.toString().trim());
+                  for (int i = 0; i < node.getChildCount(); i++) {
+                      AccessibilityNodeInfo child = node.getChild(i);
+                      if (child == null) continue;
+                      collectTexts(child, out, depth + 1);
+                  }
+              }
+
+              private static boolean gestureTapAtNode(AccessibilityNodeInfo node) {
+                  android.graphics.Rect r = new android.graphics.Rect();
+                  node.getBoundsInScreen(r);
+                  return gestureTap(r.centerX(), r.centerY());
+              }
+
+              public static boolean gestureTap(int x, int y) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return false;
+                  try {
+                      android.graphics.Path p = new android.graphics.Path();
+                      p.moveTo(x, y);
+                      android.accessibilityservice.GestureDescription.Builder b = new android.accessibilityservice.GestureDescription.Builder();
+                      b.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(p, 0, 60));
+                      return svc.dispatchGesture(b.build(), null, null);
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              /** Swipes (scroll down = content moves up). */
+              public static boolean gestureSwipe(boolean scrollDown) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return false;
+                  try {
+                      android.util.DisplayMetrics dm = svc.getResources().getDisplayMetrics();
+                      int w = dm.widthPixels, h = dm.heightPixels;
+                      android.graphics.Path p = new android.graphics.Path();
+                      if (scrollDown) { p.moveTo(w / 2, (int) (h * 0.70f)); p.lineTo(w / 2, (int) (h * 0.35f)); }
+                      else { p.moveTo(w / 2, (int) (h * 0.35f)); p.lineTo(w / 2, (int) (h * 0.70f)); }
+                      android.accessibilityservice.GestureDescription.Builder b = new android.accessibilityservice.GestureDescription.Builder();
+                      b.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(p, 0, 300));
+                      return svc.dispatchGesture(b.build(), null, null);
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
           }
           JAVAEOF
 
@@ -477,6 +1023,317 @@ jobs:
           }
           JAVAEOF
 
+          cat > "$JAVA_DIR/MJOverlayService.java" << 'JAVAEOF'
+          package com.mj.assistant;
+
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.BlurMaskFilter;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.PixelFormat;
+          import android.graphics.RadialGradient;
+          import android.graphics.Shader;
+          import android.os.IBinder;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+
+          /**
+           * MJ Floating Orb + Rainbow Edge Lighting (system-wide overlay).
+           *
+           * - Particle orb (mirrors the in-app Jarvis orb): orbiting particle
+           *   ring + glowing core, rainbow hue auto-cycles, pulses in sync with
+           *   the voice session state. Draggable with edge magnetism; tap opens MJ.
+           * - Edge lighting: frosted rainbow glow around the screen edges —
+           *   ONLY while the MJ app is minimized; hidden while the app is on top.
+           */
+          public class MJOverlayService extends Service {
+              private WindowManager windowManager;
+              private OrbView orbView;
+              private EdgeGlowView edgeView;
+              private static volatile MJOverlayService instance;
+              private static volatile String state = "idle";
+              private static volatile boolean appInForeground = true;
+
+              public static void setAgentState(String s) {
+                  state = s == null ? "idle" : s;
+              }
+
+              public static void setAppInForeground(boolean foreground) {
+                  appInForeground = foreground;
+                  MJOverlayService svc = instance;
+                  if (svc != null) svc.updateEdgeVisibility();
+              }
+
+              public static boolean isRunning() {
+                  return instance != null;
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  instance = this;
+                  windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  float density = getResources().getDisplayMetrics().density;
+
+                  // --- Edge lighting (full-screen, not touchable, auto-fits any phone) ---
+                  edgeView = new EdgeGlowView(this);
+                  WindowManager.LayoutParams edgeParams = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT);
+                  edgeParams.gravity = Gravity.CENTER;
+                  try {
+                      windowManager.addView(edgeView, edgeParams);
+                  } catch (Exception ignored) {
+                  }
+
+                  // --- Floating particle orb ---
+                  orbView = new OrbView(this);
+                  int size = (int) (density * 64);
+                  WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                          size, size,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          PixelFormat.TRANSLUCENT);
+                  params.gravity = Gravity.TOP | Gravity.START;
+                  params.x = 24;
+                  params.y = 420;
+                  try {
+                      windowManager.addView(orbView, params);
+                  } catch (Exception e) {
+                      stopSelf();
+                      return;
+                  }
+                  updateEdgeVisibility();
+              }
+
+              private void updateEdgeVisibility() {
+                  if (edgeView != null) {
+                      edgeView.setVisibility(appInForeground ? View.GONE : View.VISIBLE);
+                  }
+              }
+
+              @Override
+              public void onDestroy() {
+                  if (orbView != null) {
+                      try { windowManager.removeView(orbView); } catch (Exception ignored) { }
+                      orbView = null;
+                  }
+                  if (edgeView != null) {
+                      try { windowManager.removeView(edgeView); } catch (Exception ignored) { }
+                      edgeView = null;
+                  }
+                  instance = null;
+                  super.onDestroy();
+              }
+
+              /** Voice-synced motion parameters for the current session state. */
+              private static float[] stateMotion() {
+                  // {amplitude, pulseSpeed, rotation, spread}
+                  if ("speaking".equals(state)) return new float[]{0.42f, 3.2f, 2.6f, 0.20f};
+                  if ("listening".equals(state)) return new float[]{0.22f, 2.2f, 1.6f, 0.10f};
+                  if ("thinking".equals(state) || "searching".equals(state)) return new float[]{0.28f, 2.6f, 2.0f, 0.14f};
+                  if ("connecting".equals(state)) return new float[]{0.30f, 3.0f, 2.2f, 0.16f};
+                  return new float[]{0.10f, 1.0f, 0.7f, 0.03f};
+              }
+
+              /**
+               * Particle orb — mirrors the in-app Jarvis orb: orbiting particle
+               * ring with a glowing core. Rainbow hue auto-cycles; pulse and
+               * ring spread follow the live voice state.
+               */
+              private class OrbView extends View {
+                  private static final int PARTICLES = 46;
+                  private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint core = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint particle = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final float[] angles = new float[PARTICLES];
+                  private final float[] speeds = new float[PARTICLES];
+                  private final float[] radii = new float[PARTICLES];
+                  private WindowManager.LayoutParams params;
+                  private float phase = 0f;
+                  private float downX, downY, startX, startY;
+                  private long downAt;
+                  private boolean dragging;
+
+                  OrbView(Context c) {
+                      super(c);
+                      java.util.Random rnd = new java.util.Random();
+                      for (int i = 0; i < PARTICLES; i++) {
+                          angles[i] = rnd.nextFloat() * 360f;
+                          speeds[i] = 0.5f + rnd.nextFloat() * 1.5f;
+                          radii[i] = 0.45f + rnd.nextFloat() * 0.42f;
+                      }
+                      post(animator);
+                  }
+
+                  void setParams(WindowManager.LayoutParams p) {
+                      params = p;
+                  }
+
+                  private final Runnable animator = new Runnable() {
+                      @Override
+                      public void run() {
+                          phase += 0.05f;
+                          invalidate();
+                          postDelayed(this, 33); // ~30fps — battery conscious
+                      }
+                  };
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      float cx = getWidth() / 2f, cy = getHeight() / 2f;
+                      float base = Math.min(cx, cy);
+                      float[] m = stateMotion();
+                      float pulse = (float) Math.sin(phase * m[1]);
+                      int hue = (int) ((phase * 40f) % 360f);
+                      float pScale = getResources().getDisplayMetrics().density / 2f;
+
+                      // Ambient glow behind the orb
+                      glow.setShader(new RadialGradient(cx, cy, base,
+                              Color.HSVToColor(150, new float[]{(hue + 70f) % 360f, 0.9f, 1f}),
+                              Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                      canvas.drawCircle(cx, cy, base * 0.95f, glow);
+
+                      // Orbiting particle ring — the in-app orb look
+                      for (int i = 0; i < PARTICLES; i++) {
+                          float a = (float) Math.toRadians(angles[i] + phase * m[2] * speeds[i]);
+                          float r = base * (radii[i] * (0.85f + 0.15f * pulse) + m[3] * pulse);
+                          float px = cx + (float) Math.cos(a) * r;
+                          float py = cy + (float) Math.sin(a) * r * 0.92f;
+                          int ph = (hue + i * 9) % 360;
+                          particle.setColor(Color.HSVToColor(235, new float[]{ph, 0.85f, 1f}));
+                          float size = 2.2f * (0.8f + 0.7f * (0.5f + 0.5f * pulse)) * pScale;
+                          canvas.drawCircle(px, py, size, particle);
+                      }
+
+                      // Glowing core
+                      core.setShader(new RadialGradient(cx, cy, base * 0.42f,
+                              Color.HSVToColor(255, new float[]{hue, 0.55f, 1f}),
+                              Color.HSVToColor(140, new float[]{(hue + 40f) % 360f, 0.9f, 0.4f}),
+                              Shader.TileMode.CLAMP));
+                      float coreR = base * (0.30f + 0.12f * m[0] * pulse);
+                      canvas.drawCircle(cx, cy, coreR, core);
+                      core.setShader(null);
+                      core.setColor(Color.argb(220, 255, 255, 255));
+                      canvas.drawCircle(cx - coreR * 0.15f, cy - coreR * 0.18f, coreR * 0.18f, core);
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent e) {
+                      switch (e.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                              downX = e.getRawX();
+                              downY = e.getRawY();
+                              startX = params.x;
+                              startY = params.y;
+                              downAt = System.currentTimeMillis();
+                              dragging = false;
+                              return true;
+                          case MotionEvent.ACTION_MOVE:
+                              float dx = e.getRawX() - downX;
+                              float dy = e.getRawY() - downY;
+                              if (Math.abs(dx) > 8 || Math.abs(dy) > 8) dragging = true;
+                              params.x = startX + (int) dx;
+                              params.y = startY + (int) dy;
+                              try {
+                                  windowManager.updateViewLayout(this, params);
+                              } catch (Exception ignored) {
+                              }
+                              return true;
+                          case MotionEvent.ACTION_UP:
+                              if (!dragging && System.currentTimeMillis() - downAt < 400) {
+                                  Intent i = new Intent(getContext(), MainActivity.class);
+                                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                                  try {
+                                      getContext().startActivity(i);
+                                  } catch (Exception ignored) {
+                                  }
+                              } else {
+                                  // Edge magnetism — snap to the nearest side
+                                  try {
+                                      int w = getResources().getDisplayMetrics().widthPixels;
+                                      params.x = (params.x + getWidth() / 2 < w / 2) ? 8 : w - getWidth() - 8;
+                                      windowManager.updateViewLayout(this, params);
+                                  } catch (Exception ignored) {
+                                  }
+                              }
+                              return true;
+                      }
+                      return false;
+                  }
+              }
+
+              /**
+               * Rainbow edge lighting — frosted blurred glow around the screen
+               * edges, visible ONLY while the MJ app is minimized. Thickness
+               * scales with the shorter screen side so it auto-fits any phone.
+               */
+              private class EdgeGlowView extends View {
+                  private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private float phase = 0f;
+
+                  EdgeGlowView(Context c) {
+                      super(c);
+                      // BlurMaskFilter requires software rendering
+                      setLayerType(LAYER_TYPE_SOFTWARE, null);
+                      post(animator);
+                  }
+
+                  private final Runnable animator = new Runnable() {
+                      @Override
+                      public void run() {
+                          phase += 0.05f;
+                          if (getVisibility() == VISIBLE) invalidate();
+                          postDelayed(this, 33);
+                      }
+                  };
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      int w = getWidth(), h = getHeight();
+                      if (w <= 0 || h <= 0) return;
+                      float thickness = Math.min(w, h) * 0.035f;
+                      float[] m = stateMotion();
+                      float alpha = 0.35f + 0.65f * (0.5f + 0.5f * (float) Math.sin(phase * m[1]));
+                      if ("idle".equals(state)) alpha *= 0.45f;
+                      int hue = (int) ((phase * 40f) % 360f);
+                      int[] colors = new int[7];
+                      for (int i = 0; i < colors.length; i++) {
+                          colors[i] = Color.HSVToColor((int) (alpha * 255),
+                                  new float[]{(hue + i * 51f) % 360f, 0.85f, 1f});
+                      }
+                      edgePaint.setMaskFilter(new BlurMaskFilter(thickness * 0.9f, BlurMaskFilter.Blur.NORMAL));
+                      // top & bottom edges
+                      edgePaint.setShader(new LinearGradient(0, 0, w, 0, colors, null, Shader.TileMode.CLAMP));
+                      canvas.drawRect(0, 0, w, thickness, edgePaint);
+                      canvas.drawRect(0, h - thickness, w, h, edgePaint);
+                      // left & right edges
+                      edgePaint.setShader(new LinearGradient(0, 0, 0, h, colors, null, Shader.TileMode.CLAMP));
+                      canvas.drawRect(0, 0, thickness, h, edgePaint);
+                      canvas.drawRect(w - thickness, 0, w, h, edgePaint);
+                  }
+              }
+          }
+          JAVAEOF
+
           cat > "$JAVA_DIR/MainActivity.java" << 'JAVAEOF'
           package com.mj.assistant;
 
@@ -488,6 +1345,20 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   registerPlugin(MJNativePlugin.class);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  // App on top: edge lighting stays off
+                  MJOverlayService.setAppInForeground(true);
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  // App minimized: floating orb + rainbow edge lighting take over
+                  MJOverlayService.setAppInForeground(false);
               }
           }
           JAVAEOF
@@ -531,6 +1402,15 @@ jobs:
           if "MJVoiceService" not in s:
               service = '<service android:name=".MJVoiceService" android:exported="false" android:foregroundServiceType="microphone" />\n        '
               s = s.replace("</application>", service + "</application>", 1)
+          if "SYSTEM_ALERT_WINDOW" not in s:
+              s = s.replace(
+                  "<uses-permission",
+                  '<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />\n            <uses-permission',
+                  1,
+              )
+          if "MJOverlayService" not in s:
+              overlay_service = '<service android:name=".MJOverlayService" android:exported="false" />\n        '
+              s = s.replace("</application>", overlay_service + "</application>", 1)
           if "MJAccessibilityService" not in s:
               acc_service = (
                   '<service android:name=".MJAccessibilityService" android:exported="false" '

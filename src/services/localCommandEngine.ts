@@ -17,6 +17,7 @@
 
 import { Capacitor } from '@capacitor/core';
 import { appScanner, AppDefinition } from './appScanner';
+import { androidAgent } from './androidAgent';
 import { ActiveTask } from '../types';
 
 export interface LocalCommandResult {
@@ -79,6 +80,105 @@ class LocalCommandEngine {
             feedbackText: `${app.name} খুলছি...`,
             activeApp: app.name,
           };
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 1a. YOUTUBE SEARCH & PLAY — full on-device agent flow
+    //     ("YouTube e X search kore play koro")
+    // ---------------------------------------------------------------
+    const ytMatch =
+      text.match(/(?:youtube|yt|ইউটিউব)[\s]*(?:e|me|may|te|te|-এ|ে|তে|এ|তে|মধ্যে)?\s+(.+?)\s+(?:search|khojo|khunjo|dhundo|play|chalao|chala|bajo|lagao|সার্চ|খোঁজো|খুঁজে|চালাও|বাজাও|লাগাও)/i) ||
+      text.match(/(.+?)\s+(?:search|khojo|khunjo|dhundo|সার্চ|খোঁজো)\s*(?:kore|করে)?\s*(?:youtube|yt|ইউটিউব)[\s]*(?:e|te|eme|-এ|তে)?/i);
+    if (ytMatch && ytMatch[1]) {
+      const query = ytMatch[1]
+        .replace(/\b(gaan|gaana|song|video|ke|ka|er|কে|এর|একটা|ekta|the|a)\b/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (query && query.length > 1 && Capacitor.isNativePlatform()) {
+        void androidAgent.youtubeSearchAndPlay(query);
+        return {
+          isLocalCommand: true,
+          actionTaken: 'youtube_search_play',
+          feedbackText: `YouTube-এ ${query} খুঁজে চালাচ্ছি জান...`,
+        };
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 1b. CHROME SEARCH — on-device agent flow
+    // ---------------------------------------------------------------
+    const chromeMatch =
+      text.match(/(?:chrome|ক্রোম)[\s]*(?:e|me|te|-এ|ে|তে|এ)?\s+(.+?)\s+(?:search|khojo|khunjo|dhundo|সার্চ|খোঁজো)/i) ||
+      text.match(/(.+?)\s+(?:search|khojo|khunjo|সার্চ|খোঁজো)\s*(?:kore|করে)?\s*(?:chrome|ক্রোম)[\s]*(?:e|te)?/i);
+    if (chromeMatch && chromeMatch[1]) {
+      const query = chromeMatch[1].replace(/\s+/g, ' ').trim();
+      if (query && query.length > 1 && Capacitor.isNativePlatform()) {
+        void androidAgent.chromeSearch(query);
+        return {
+          isLocalCommand: true,
+          actionTaken: 'chrome_search',
+          feedbackText: `Chrome-এ ${query} সার্চ করছি জান...`,
+        };
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 1c. SCROLL — accessibility node scroll (gesture fallback)
+    // ---------------------------------------------------------------
+    if (/(scroll|স্ক্রল)/.test(text) || /niche|নিচে|উপরে|upore|upore jao/.test(text)) {
+      if (/(scroll|স্ক্রল|niche|নিচে|নিচে যাও|down)/.test(text)) {
+        const r = await androidAgent.scrollScreen(true);
+        if (r.success) {
+          return { isLocalCommand: true, actionTaken: 'scroll_down', feedbackText: r.message };
+        }
+      } else if (/(up|upore|উপরে)/.test(text)) {
+        const r = await androidAgent.scrollScreen(false);
+        if (r.success) {
+          return { isLocalCommand: true, actionTaken: 'scroll_up', feedbackText: r.message };
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 1d. FLOATING ORB OVERLAY — system-wide rainbow orb
+    // ---------------------------------------------------------------
+    if (/(floating orb|float orb|overlay|ফ্লোটিং|ফ্লোটিং অর্ব)/.test(text)) {
+      const p = this.plugin();
+      if (p?.startOverlay) {
+        const turnOff = /(off|bandh|বন্ধ|hide|লুকাও|চাপা)/.test(text);
+        const turnOn = !turnOff && /(on|chalu|chalao|dekha|show|চালু|দেখাও)/.test(text);
+        if (turnOn) {
+          try {
+            const perm: any = await p.isOverlayEnabled();
+            if (!perm?.granted) {
+              await p.openOverlaySettings();
+              return {
+                isLocalCommand: true,
+                actionTaken: 'overlay_permission',
+                feedbackText: 'একটু permission দাও জান — "Display over other apps" এ MJ-কে Allow করো, তারপর আবার বলো "floating orb চালু করো"।',
+              };
+            }
+            await p.startOverlay();
+            localStorage.setItem('mj_floating_orb', 'true');
+            return {
+              isLocalCommand: true,
+              actionTaken: 'overlay_on',
+              feedbackText: 'ফ্লোটিং অর্ব চালু করে দিয়েছি জান! যেকোনো অ্যাপের উপরে থাকবে।',
+            };
+          } catch {
+            return { isLocalCommand: true, actionTaken: 'overlay_failed', feedbackText: 'অর্ব চালু করতে সমস্যা হচ্ছে জান।' };
+          }
+        }
+        if (turnOff) {
+          try {
+            await p.stopOverlay();
+            localStorage.setItem('mj_floating_orb', 'false');
+            return { isLocalCommand: true, actionTaken: 'overlay_off', feedbackText: 'ফ্লোটিং অর্ব বন্ধ করেছি।' };
+          } catch {
+            /* fall through */
+          }
         }
       }
     }

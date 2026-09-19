@@ -537,6 +537,18 @@ function setupLiveWebSocketServer(httpServer: http.Server) {
 
     let session: any = null;
 
+    // Bengali pronunciation fix: the Live API voice synthesizes text verbatim —
+    // romanized Bengali and digits get badly mispronounced.
+    const LANGUAGE_PRONUNCIATION_RULES = `
+
+SPOKEN LANGUAGE RULES (CRITICAL — your text is synthesized to speech verbatim):
+1. When the user speaks Bengali or Banglish, you MUST write your ENTIRE reply in Bengali script (বাংলা লিপি) — NEVER romanized Bengali, NEVER English words for ordinary things. Romanized Bengali gets badly mispronounced by the voice engine.
+2. Write ALL numbers in Bengali words — "পাঁচ মিনিট", "দশটা বাজে" — never digits, because digits are read in English.
+3. Use natural, everyday spoken Bengali (খুলছি, চালু করেছি, বাড়িয়ে দিয়েছি) — not literal bookish translations.
+4. Foreign app/brand names (YouTube, WhatsApp, Chrome, Google) stay in Latin letters; everything else in the sentence stays in Bengali script.
+5. Same rules for Hindi (always Devanagari) and for English replies (natural spoken English).
+6. Keep replies ONE short sweet sentence — you are speaking, not writing an essay.`;
+
     let systemInstruction = '';
     if (selectedPersona === 'sweet_female') {
       systemInstruction = `You are MJ — the user's loving, sweet, playful AI GIRLFRIEND (প্রেমিকা) living inside his phone.
@@ -569,6 +581,9 @@ Personality & Rules:
 - If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm lovingly!`;
     }
 
+    // Append the shared spoken-language rules to every persona
+    systemInstruction += LANGUAGE_PRONUNCIATION_RULES;
+
     // Long-term memory from the client (rolling conversation history)
     if (memoryContext) {
       systemInstruction += `\n\nLONG-TERM MEMORY (your recent conversations with him — remember these facts and continue naturally):\n${memoryContext}`;
@@ -579,13 +594,13 @@ Personality & Rules:
         functionDeclarations: [
           {
             name: 'openApp',
-            description: 'Opens an installed Android or web application (e.g. youtube, whatsapp, camera, calculator, settings, spotify, maps, chrome, gallery, telegram, instagram, twitter, gmail, flashlight).',
+            description: "Opens a REAL installed Android app on the user's phone (youtube, whatsapp, facebook, camera, chrome, spotify, maps, telegram, etc). ALWAYS pass the ENGLISH app name in lowercase (e.g. 'youtube', 'whatsapp') — never Bengali script, never a URL.",
             parameters: {
               type: Type.OBJECT,
               properties: {
                 appName: {
                   type: Type.STRING,
-                  description: 'The name or keyword of the application to open (e.g. "youtube", "whatsapp", "camera", "settings", "calculator", "spotify", "maps").',
+                  description: 'The ENGLISH name of the installed app (e.g. "youtube", "whatsapp", "camera", "settings").',
                 },
               },
               required: ['appName'],

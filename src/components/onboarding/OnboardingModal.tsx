@@ -13,6 +13,9 @@ import {
   Zap,
   Activity,
   Radio,
+  Mic,
+  Layers,
+  Accessibility,
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 
@@ -40,12 +43,81 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   onComplete,
   deferredPrompt,
 }) => {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [apiKey, setApiKey] = useState<string>('');
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<CodecTestResult | null>(null);
   const [useServerKey, setUseServerKey] = useState<boolean>(true);
   const [installSuccess, setInstallSuccess] = useState<boolean>(false);
+
+  // ---- Permission Center (step 3) ----
+  const [permStatus, setPermStatus] = useState<{
+    mic: boolean;
+    notifications: boolean;
+    overlay: boolean;
+    accessibility: boolean;
+  }>({ mic: false, notifications: false, overlay: false, accessibility: false });
+
+  const isNative = Capacitor.isNativePlatform();
+
+  const refreshPermissions = async () => {
+    if (!isNative) return;
+    try {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      if (MJNative?.getPermissionStatus) {
+        const s: any = await MJNative.getPermissionStatus();
+        setPermStatus({
+          mic: !!s?.mic,
+          notifications: !!s?.notifications,
+          overlay: !!s?.overlay,
+          accessibility: !!s?.accessibility,
+        });
+      }
+    } catch {
+      /* status stays as-is */
+    }
+  };
+
+  // Poll permission status while the Permission Center step is visible
+  // (returning from system settings must refresh the ticks)
+  useEffect(() => {
+    if (step !== 3 || !isOpen) return;
+    void refreshPermissions();
+    const t = setInterval(() => void refreshPermissions(), 1500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, isOpen]);
+
+  const requestMicAndNotifications = async () => {
+    if (!isNative) return;
+    try {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      await MJNative?.requestRuntimePermissions?.();
+      setTimeout(() => void refreshPermissions(), 800);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const openOverlayPermSettings = async () => {
+    if (!isNative) return;
+    try {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      await MJNative?.openOverlaySettings?.();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const openAccessibilityPermSettings = async () => {
+    if (!isNative) return;
+    try {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      await MJNative?.openAccessibilitySettings?.();
+    } catch {
+      /* ignore */
+    }
+  };
 
   useEffect(() => {
     const saved = localStorage.getItem('gemini_custom_api_key');
@@ -202,19 +274,20 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               </div>
               <div>
                 <span className="text-[10px] font-mono uppercase tracking-widest text-cyan-400 font-bold block">
-                  SYSTEM INITIALIZATION • STEP {step} OF 3
+                  SYSTEM INITIALIZATION • STEP {step} OF 4
                 </span>
                 <h2 className="text-lg font-bold text-white tracking-tight">
                   {step === 1 && 'Welcome to JARVIS MK-85'}
                   {step === 2 && 'API Calibration & Codec Test'}
-                  {step === 3 && 'Set as Default Assistant'}
+                  {step === 3 && 'Permission Grants'}
+                  {step === 4 && 'Set as Default Assistant'}
                 </h2>
               </div>
             </div>
 
             {/* Step Indicators */}
             <div className="flex items-center space-x-1.5">
-              {[1, 2, 3].map((s) => (
+              {[1, 2, 3, 4].map((s) => (
                 <div
                   key={s}
                   className={`h-1.5 rounded-full transition-all duration-300 ${
@@ -430,6 +503,112 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                   onClick={() => setStep(3)}
                   className="flex-1 py-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold text-xs flex items-center justify-center space-x-1.5 shadow-md shadow-cyan-500/20"
                 >
+                  <span>Next: Grant Permissions</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Step 3: Permission Grants — all Android permissions in one place */}
+          {step === 3 && (
+            <motion.div
+              key="step-3"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="relative z-10 py-4 space-y-3 max-h-[65vh] overflow-y-auto scrollbar-none"
+            >
+              <div className="p-3 rounded-2xl bg-cyan-950/20 border border-cyan-500/25">
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Allow everything now so MJ never asks again — every popup comes right here, one by one.
+                </p>
+              </div>
+
+              {/* Microphone + Notifications (real runtime popups) */}
+              <button
+                onClick={requestMicAndNotifications}
+                className={`w-full p-3.5 rounded-2xl border flex items-center space-x-3 text-left transition-all active:scale-[0.98] ${
+                  permStatus.mic && permStatus.notifications
+                    ? 'bg-emerald-950/25 border-emerald-500/40'
+                    : 'bg-white/[0.03] border-white/10 hover:border-cyan-500/40'
+                }`}
+              >
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                  <Mic className="w-4 h-4 text-cyan-300" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-white">Microphone & Notifications</p>
+                  <p className="text-[10px] text-slate-400">Voice + background alerts (system popup)</p>
+                </div>
+                {permStatus.mic && permStatus.notifications ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                ) : (
+                  <span className="px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 text-[10px] font-bold shrink-0">Allow</span>
+                )}
+              </button>
+
+              {/* Display over other apps (floating orb + edge lighting) */}
+              <button
+                onClick={openOverlayPermSettings}
+                className={`w-full p-3.5 rounded-2xl border flex items-center space-x-3 text-left transition-all active:scale-[0.98] ${
+                  permStatus.overlay
+                    ? 'bg-emerald-950/25 border-emerald-500/40'
+                    : 'bg-white/[0.03] border-white/10 hover:border-cyan-500/40'
+                }`}
+              >
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                  <Layers className="w-4 h-4 text-cyan-300" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-white">Display Over Other Apps</p>
+                  <p className="text-[10px] text-slate-400">Floating Orb + Edge Lighting (settings page)</p>
+                </div>
+                {permStatus.overlay ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                ) : (
+                  <span className="px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 text-[10px] font-bold shrink-0">Allow</span>
+                )}
+              </button>
+
+              {/* Accessibility (Android Agent) */}
+              <button
+                onClick={openAccessibilityPermSettings}
+                className={`w-full p-3.5 rounded-2xl border flex items-center space-x-3 text-left transition-all active:scale-[0.98] ${
+                  permStatus.accessibility
+                    ? 'bg-emerald-950/25 border-emerald-500/40'
+                    : 'bg-white/[0.03] border-white/10 hover:border-cyan-500/40'
+                }`}
+              >
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                  <Accessibility className="w-4 h-4 text-cyan-300" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-white">Accessibility — MJ Android Agent</p>
+                  <p className="text-[10px] text-slate-400">Screen control: search, type, scroll, Back/Home</p>
+                </div>
+                {permStatus.accessibility ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                ) : (
+                  <span className="px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 text-[10px] font-bold shrink-0">Allow</span>
+                )}
+              </button>
+
+              <p className="text-[10px] text-slate-500 text-center px-2">
+                Ticks update automatically — return from Settings and they turn green.
+              </p>
+
+              <div className="flex items-center space-x-3 pt-2">
+                <button
+                  onClick={() => setStep(2)}
+                  className="px-4 py-3 rounded-2xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={() => setStep(4)}
+                  className="flex-1 py-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold text-xs flex items-center justify-center space-x-1.5 shadow-md shadow-cyan-500/20"
+                >
                   <span>Next: Default Assistant Setup</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
@@ -437,10 +616,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             </motion.div>
           )}
 
-          {/* Step 3: Default Assistant & PWA Install */}
-          {step === 3 && (
+          {/* Step 4: Default Assistant & PWA Install */}
+          {step === 4 && (
             <motion.div
-              key="step-3"
+              key="step-4"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
@@ -493,7 +672,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               {/* Launch Assistant */}
               <div className="flex items-center space-x-3 pt-2">
                 <button
-                  onClick={() => setStep(2)}
+                  onClick={() => setStep(3)}
                   className="px-4 py-3 rounded-2xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold"
                 >
                   Back
