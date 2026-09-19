@@ -164,7 +164,8 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
       if (!canvas.parentElement) return;
       const rect = canvas.parentElement.getBoundingClientRect();
       const size = Math.min(340, Math.max(280, rect.width || 310));
-      const dpr = window.devicePixelRatio || 1;
+      // Cap DPR at 2 — 3x screens gain nothing visually but triple the fill cost
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
       width = size;
       height = size;
       canvas.width = size * dpr;
@@ -177,8 +178,13 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
     updateDimensions();
     window.addEventListener('resize', updateDimensions);
 
-    // Generate ~880 particles on a mathematical Fibonacci Sphere
-    const numParticles = 880;
+    // Generate particles on a mathematical Fibonacci Sphere.
+    // PERFORMANCE: phones get fewer particles (plus no shadowBlur below) so
+    // the orb stays buttery-smooth at 60fps even on budget Android devices.
+    const isTouchDevice = (() => {
+      try { return window.matchMedia('(pointer: coarse)').matches; } catch { return false; }
+    })();
+    const numParticles = isTouchDevice ? 520 : 880;
     const particles: Particle[] = [];
     const goldenRatio = (1 + Math.sqrt(5)) / 2;
     const goldenAngle = 2 * Math.PI * (1 - 1 / goldenRatio);
@@ -314,14 +320,18 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
         const t = (elapsed - sw.born) / 0.9;
         if (t >= 1 || t < 0) { shockwaves.splice(i, 1); continue; }
         const fade = 1 - t;
-        ctx.strokeStyle = `rgba(${sw.color[0]},${sw.color[1]},${sw.color[2]},${fade * 0.55})`;
-        ctx.lineWidth = 1.5 + fade * 5;
-        ctx.shadowColor = colA;
-        ctx.shadowBlur = 12 * fade;
+        const swR = sphereR * (0.65 + t * 1.45);
+        // Layered glow strokes — no shadowBlur (mobile GPU killer)
+        ctx.strokeStyle = `rgba(${sw.color[0]},${sw.color[1]},${sw.color[2]},${fade * 0.16})`;
+        ctx.lineWidth = 4 + fade * 12;
         ctx.beginPath();
-        ctx.arc(centerX, centerY, sphereR * (0.65 + t * 1.45), 0, Math.PI * 2);
+        ctx.arc(centerX, centerY, swR, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.shadowBlur = 0;
+        ctx.strokeStyle = `rgba(${sw.color[0]},${sw.color[1]},${sw.color[2]},${fade * 0.55})`;
+        ctx.lineWidth = 1.5 + fade * 3;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, swR, 0, Math.PI * 2);
+        ctx.stroke();
       }
 
       // ============ 2. LUMINOUS CORE ============
@@ -355,21 +365,22 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
         ctx.arc(0, 0, gyroRadius, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Traveling photon pulse
+        // Traveling photon pulse (layered glow — no shadowBlur for mobile perf)
         const photonAlpha = cur.ringAlpha * (0.6 + amp) * bootEase;
         if (photonAlpha > 0.06) {
           const pa = elapsed * spinDir * (2.4 + amp * 2.5);
           const px = Math.cos(pa) * gyroRadius;
           const py = Math.sin(pa) * gyroRadius;
+          ctx.fillStyle = `rgba(${cur.colorB[0]},${cur.colorB[1]},${cur.colorB[2]},${photonAlpha * 0.25})`;
+          ctx.beginPath();
+          ctx.arc(px, py, 7.5, 0, Math.PI * 2);
+          ctx.fill();
           ctx.fillStyle = accent;
-          ctx.shadowColor = accent;
-          ctx.shadowBlur = 10;
           ctx.globalAlpha = Math.min(1, photonAlpha);
           ctx.beginPath();
           ctx.arc(px, py, 3.0, 0, Math.PI * 2);
           ctx.fill();
           ctx.globalAlpha = 1;
-          ctx.shadowBlur = 0;
         }
         ctx.restore();
       };
@@ -459,10 +470,10 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
       projected.sort((a, b) => a.sz - b.sz);
 
       // ============ 5. NEURAL HOLOGRAPHIC FILAMENTS (speaking / thinking) ============
-      if (cur.filament > 0.08 && (amp > 0.08 || cur.vortex > 0.2)) {
+      if (cur.filament > 0.25 && (amp > 0.08 || cur.vortex > 0.2)) {
         ctx.lineWidth = 0.8;
         const maxDistSq = 576;
-        const foregroundStart = Math.max(0, projected.length - 70);
+        const foregroundStart = Math.max(0, projected.length - 55);
         for (let i = foregroundStart; i < projected.length; i++) {
           const p1 = projected[i];
           if (p1.alpha < 0.55) continue;
@@ -509,10 +520,15 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
       const numTicks = 120;
 
       ctx.save();
+      // Layered glow ring — no shadowBlur (mobile GPU killer)
+      ctx.strokeStyle = `rgba(${cur.colorA[0]},${cur.colorA[1]},${cur.colorA[2]},${0.10 + amp * 0.14})`;
+      ctx.lineWidth = 6.0;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, outerRingRadius, 0, Math.PI * 2);
+      ctx.stroke();
+
       ctx.strokeStyle = colA;
       ctx.lineWidth = 2.0;
-      ctx.shadowColor = colA;
-      ctx.shadowBlur = 8 + amp * 16 + cur.haloAlpha * 20;
 
       // Boot arc sweep while connecting
       if (bootEase < 1) {
@@ -571,12 +587,14 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
         ctx.beginPath();
         ctx.arc(centerX, centerY, outerRingRadius - 5, comet, comet + Math.PI * 0.75);
         ctx.stroke();
-        // Comet head
+        // Comet head (layered glow — no shadowBlur)
         const hx = centerX + Math.cos(comet + Math.PI * 0.75) * (outerRingRadius - 5);
         const hy = centerY + Math.sin(comet + Math.PI * 0.75) * (outerRingRadius - 5);
+        ctx.fillStyle = `rgba(${cur.colorB[0]},${cur.colorB[1]},${cur.colorB[2]},${0.25})`;
+        ctx.beginPath();
+        ctx.arc(hx, hy, 9.5, 0, Math.PI * 2);
+        ctx.fill();
         ctx.fillStyle = colB;
-        ctx.shadowColor = colB;
-        ctx.shadowBlur = 14;
         ctx.beginPath();
         ctx.arc(hx, hy, 4.0, 0, Math.PI * 2);
         ctx.fill();

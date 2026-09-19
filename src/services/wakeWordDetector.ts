@@ -16,8 +16,19 @@ export class WakeWordDetector {
   private recognition: any = null;
   private isListening = false;
   private isEnabled = true;
+  private isSessionPaused = false;
   private onWakeCallback?: WakeWordCallback;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private handleVisibilityChange = (): void => {
+    // PERFORMANCE: release the mic & speech service while the app is
+    // backgrounded/screen-off; resume when visible again.
+    if (document.visibilityState === 'visible') {
+      if (this.isEnabled && !this.isSessionPaused) this.start();
+    } else {
+      this.stop();
+    }
+  };
 
   // Recognized trigger phrases
   private readonly wakeKeywords = [
@@ -50,6 +61,8 @@ export class WakeWordDetector {
     }
 
     try {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
@@ -80,8 +93,8 @@ export class WakeWordDetector {
 
       this.recognition.onend = () => {
         this.isListening = false;
-        // Automatically restart wake word listening if still enabled
-        if (this.isEnabled) {
+        // Automatically restart wake word listening if still enabled and app visible
+        if (this.isEnabled && !this.isSessionPaused && document.visibilityState !== 'hidden') {
           this.scheduleRestart(350);
         }
       };
@@ -99,6 +112,7 @@ export class WakeWordDetector {
 
   public start(): void {
     if (!this.recognition || this.isListening || !this.isEnabled) return;
+    if (document.hidden) return; // wait until the app is visible again
     try {
       this.recognition.start();
       this.isListening = true;
@@ -126,10 +140,14 @@ export class WakeWordDetector {
   }
 
   public pause(): void {
+    // Called while a live session owns the mic — remember so the visibility
+    // handler doesn't restart the detector behind the session's back.
+    this.isSessionPaused = true;
     this.stop();
   }
 
   public resume(): void {
+    this.isSessionPaused = false;
     if (this.isEnabled) {
       this.start();
     }

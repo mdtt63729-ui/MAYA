@@ -57,6 +57,13 @@ export class LiveSession {
   private lastUserVoiceAt = 0;
   private hadUserVoice = false;
 
+  // Auto-reconnect resilience (fixes "Connection to Gemini Live lost")
+  private static readonly MAX_RECONNECT_ATTEMPTS = 3;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private isManualDisconnect = false;
+  private receivedServerError = false;
+
   constructor() {
     // Scan all installed apps on session engine boot
     appScanner.scanInstalledApps();
@@ -205,8 +212,12 @@ export class LiveSession {
    * Connect to Gemini Live audio session
    */
   public async connect(callbacks: LiveSessionCallbacks): Promise<void> {
-    if (this.state !== 'disconnected') {
-      this.disconnect();
+    this.cancelReconnect();
+    this.isManualDisconnect = false;
+    this.receivedServerError = false;
+
+    if (this.state !== 'disconnected' && this.ws) {
+      this.performDisconnect();
     }
 
     this.callbacks = callbacks;
@@ -251,6 +262,8 @@ export class LiveSession {
           // now auto-recovers the mic if the OS ever drops it.
 
           this.startThinkingMonitor();
+          // Session is live & healthy — reset the reconnect budget
+          this.reconnectAttempts = 0;
           this.setState('listening');
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : 'Microphone access denied';
@@ -294,6 +307,7 @@ export class LiveSession {
 
           // 6. Server error notification
           if (data.error) {
+            this.receivedServerError = true;
             this.callbacks.onError?.(data.error);
           }
         } catch (e) {
@@ -302,13 +316,53 @@ export class LiveSession {
       };
 
       this.ws.onerror = (err) => {
+        // Log only — onclose handles recovery/reconnection right after this
         console.error('WebSocket error in LiveSession:', err);
-        this.callbacks.onError?.('Connection to Gemini Live lost.');
-        this.disconnect();
       };
 
       this.ws.onclose = () => {
-        this.disconnect();
+        // Socket died — release session resources but keep the callbacks
+        this.ws = null;
+        this.stopLocalSpeechRecognition();
+        this.stopThinkingMonitor();
+        if (this.searchingResetTimer) {
+          clearTimeout(this.searchingResetTimer);
+          this.searchingResetTimer = null;
+        }
+        audioStreamer.stop();
+
+        if (this.isManualDisconnect) {
+          this.setState('disconnected');
+          return;
+        }
+
+        // Unexpected loss — auto-reconnect with exponential backoff (1s → 2s → 4s)
+        if (
+          this.state !== 'disconnected' &&
+          !this.receivedServerError &&
+          this.reconnectAttempts < LiveSession.MAX_RECONNECT_ATTEMPTS
+        ) {
+          this.reconnectAttempts++;
+          this.setState('connecting');
+          const delayMs = 1000 * Math.pow(2, this.reconnectAttempts - 1);
+          console.warn(
+            `[LiveSession] Connection lost — auto-reconnect ${this.reconnectAttempts}/${LiveSession.MAX_RECONNECT_ATTEMPTS} in ${delayMs}ms`
+          );
+          this.reconnectTimer = setTimeout(() => {
+            this.connect(this.callbacks);
+          }, delayMs);
+          return;
+        }
+
+        // Retries exhausted (or the server reported a real error — already shown)
+        if (!this.receivedServerError) {
+          this.callbacks.onError?.(
+            'Connection to Gemini Live lost. Auto-retry failed — check your internet connection and that the server is running, then tap Retry.'
+          );
+        }
+        this.setState('disconnected');
+        this.reconnectAttempts = 0;
+        this.receivedServerError = false;
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to establish Live Session';
@@ -397,9 +451,15 @@ export class LiveSession {
   }
 
   /**
-   * Disconnect and release all hardware & network resources
+   * Disconnect (user action) and release all hardware & network resources
    */
   public disconnect(): void {
+    this.isManualDisconnect = true;
+    this.cancelReconnect();
+    this.performDisconnect();
+  }
+
+  private performDisconnect(): void {
     if (this.ws) {
       try {
         this.ws.close();
@@ -417,6 +477,13 @@ export class LiveSession {
     }
     audioStreamer.stop();
     this.setState('disconnected');
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private setState(newState: LiveSessionState): void {
