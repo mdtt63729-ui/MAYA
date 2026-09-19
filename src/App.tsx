@@ -131,6 +131,10 @@ export default function App() {
         onInterrupted: handleInterrupted,
         onError: (err) => {
           setErrorMessage(err);
+          // Key missing (standalone APK) — open Settings straight on the API key tab
+          if (err.toLowerCase().includes('add your gemini api key')) {
+            setIsSettingsOpen(true);
+          }
         },
       });
     } catch (err: unknown) {

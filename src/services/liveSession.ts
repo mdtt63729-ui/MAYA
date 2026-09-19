@@ -445,6 +445,14 @@ export class LiveSession {
         await this.connectDirect(apiKey);
         return;
       }
+      // No API key saved in this install — guide the user instead of
+      // pointlessly hammering a localhost server that doesn't exist here.
+      this.callbacks = callbacks;
+      this.setState('disconnected');
+      this.callbacks.onError?.(
+        'Add your Gemini API key to start. Tap the gear icon (top-right), paste your key in the API Key field, then tap Save — after that, tap the orb again.'
+      );
+      return;
     }
 
     if (this.state !== 'disconnected' && (this.ws || this.directSession)) {
