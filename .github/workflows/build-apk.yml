@@ -1338,6 +1338,8 @@ jobs:
           package com.mj.assistant;
 
           import android.os.Bundle;
+          import androidx.lifecycle.Lifecycle;
+          import androidx.lifecycle.LifecycleEventObserver;
           import com.getcapacitor.BridgeActivity;
 
           public class MainActivity extends BridgeActivity {
@@ -1345,20 +1347,17 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   registerPlugin(MJNativePlugin.class);
-              }
 
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  // App on top: edge lighting stays off
-                  MJOverlayService.setAppInForeground(true);
-              }
-
-              @Override
-              protected void onPause() {
-                  super.onPause();
-                  // App minimized: floating orb + rainbow edge lighting take over
-                  MJOverlayService.setAppInForeground(false);
+                  // Floating orb + edge lighting gate: edge lighting shows only
+                  // while MJ is MINIMIZED. BridgeActivity marks onResume/onPause
+                  // as final, so observe the AndroidX lifecycle instead.
+                  getLifecycle().addObserver((LifecycleEventObserver) (source, event) -> {
+                      if (event == Lifecycle.Event.ON_RESUME) {
+                          MJOverlayService.setAppInForeground(true);
+                      } else if (event == Lifecycle.Event.ON_PAUSE) {
+                          MJOverlayService.setAppInForeground(false);
+                      }
+                  });
               }
           }
           JAVAEOF
