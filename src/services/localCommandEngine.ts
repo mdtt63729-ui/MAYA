@@ -1,82 +1,23 @@
 /**
- * MJ Local Command Engine
- * Offline-first local intent parser and native action dispatcher.
- * Handles instant app launching, device toggles, volume, timers, and confirmation workflows
- * without requiring cloud roundtrips for local operations.
+ * MJ Local Command Engine — FAST LOCAL PATH (PRD: Ultra-Fast Response Addendum)
+ *
+ * "If the task only needs an Android action, execute it locally."
+ *
+ * Classifies recognized speech into local intents and executes them directly
+ * on the device via the MJNative Capacitor plugin — with ZERO cloud
+ * round-trip: no waiting for the model to propose a tool call.
+ *
+ * ZERO MOCK POLICY:
+ * - Real torch (CameraManager), real volume (AudioManager), real settings
+ *   intents, real system timer (AlarmClock), real system navigation
+ *   (AccessibilityService global actions).
+ * - Anything that cannot run locally returns null and falls through to the
+ *   normal AI path. No fake success, no simulated state.
  */
 
-import { ActiveTask, InstalledApp } from '../types';
-
-export const DEFAULT_INSTALLED_APPS: InstalledApp[] = [
-  {
-    id: 'youtube',
-    name: 'YouTube',
-    packageName: 'com.google.android.youtube',
-    category: 'media',
-    webUrl: 'https://www.youtube.com',
-    scheme: 'vnd.youtube:',
-    iconName: 'Play',
-  },
-  {
-    id: 'whatsapp',
-    name: 'WhatsApp',
-    packageName: 'com.whatsapp',
-    category: 'social',
-    webUrl: 'https://web.whatsapp.com',
-    scheme: 'whatsapp://',
-    iconName: 'MessageCircle',
-  },
-  {
-    id: 'playstore',
-    name: 'Google Play Store',
-    packageName: 'com.android.vending',
-    category: 'tools',
-    webUrl: 'https://play.google.com/store',
-    scheme: 'market://',
-    iconName: 'ShoppingBag',
-  },
-  {
-    id: 'chrome',
-    name: 'Google Chrome',
-    packageName: 'com.android.chrome',
-    category: 'tools',
-    webUrl: 'https://www.google.com',
-    iconName: 'Globe',
-  },
-  {
-    id: 'camera',
-    name: 'Camera',
-    packageName: 'com.android.camera',
-    category: 'tools',
-    webUrl: '#camera',
-    iconName: 'Camera',
-  },
-  {
-    id: 'gallery',
-    name: 'Photos & Gallery',
-    packageName: 'com.google.android.apps.photos',
-    category: 'media',
-    webUrl: '#gallery',
-    iconName: 'Image',
-  },
-  {
-    id: 'settings',
-    name: 'Settings',
-    packageName: 'com.android.settings',
-    category: 'system',
-    webUrl: '#settings',
-    iconName: 'Settings',
-  },
-  {
-    id: 'maps',
-    name: 'Google Maps',
-    packageName: 'com.google.android.apps.maps',
-    category: 'tools',
-    webUrl: 'https://maps.google.com',
-    scheme: 'geo:',
-    iconName: 'MapPin',
-  },
-];
+import { Capacitor } from '@capacitor/core';
+import { appScanner, AppDefinition } from './appScanner';
+import { ActiveTask } from '../types';
 
 export interface LocalCommandResult {
   isLocalCommand: boolean;
@@ -88,255 +29,365 @@ export interface LocalCommandResult {
 }
 
 class LocalCommandEngine {
-  private torchStream: MediaStream | null = null;
-  private isFlashlightOn: boolean = false;
-  private volumeLevel: number = 75;
+  private native: any | null = null;
+  private nativeChecked = false;
+
+  /** The MJNative plugin handle (null on the web). */
+  private plugin(): any | null {
+    if (!this.nativeChecked) {
+      this.nativeChecked = true;
+      this.native = Capacitor.isNativePlatform() ? (Capacitor as any).Plugins?.MJNative || null : null;
+    }
+    return this.native;
+  }
 
   /**
-   * Evaluates if speech/text is a local Android command
+   * Evaluates if recognized speech is a LOCAL command and executes it
+   * immediately. Returns null when the input should go to the AI path.
    */
-  public async executeIfLocal(
-    input: string,
-    onConfirmCallback?: () => void
-  ): Promise<LocalCommandResult | null> {
+  public async executeIfLocal(input: string): Promise<LocalCommandResult | null> {
     const text = input.trim().toLowerCase();
+    if (!text || text.length < 3) return null;
 
-    // 1. App Launching (YouTube, WhatsApp, Play Store, etc.)
-    // Supports English, Hindi/Hinglish ("kholo"), Bengali ("kholo")
-    const openMatch = text.match(
-      /(?:open|launch|kholo|khulo|khol|chalau|start)\s+([a-z0-9\s]+)/i
-    ) || text.match(/([a-z0-9\s]+)\s+(?:kholo|khulo|khol|chalau)/i);
+    // ---------------------------------------------------------------
+    // 1. OPEN APP — instant native launch, no cloud round-trip
+    // ---------------------------------------------------------------
+    const openMatch =
+      text.match(/(?:open|launch|start)\s+([a-z0-9\s]+)$/i) ||
+      text.match(/(?:kholo|khulo|chalau|chalu karo)\s+([a-z0-9\s]+)/i) ||
+      text.match(/([a-z0-9\s]+?)\s+(?:kholo|khulo|khol de|chalau)/i) ||
+      text.match(/(?:খোলো|খুলো|খুলে দাও|চালু করো)\s+(.+)/) ||
+      text.match(/(.+?)\s+(?:খোলো|খুলো|খুলে দাও|চালাও)/);
 
     if (openMatch && openMatch[1]) {
-      const targetQuery = openMatch[1].trim().toLowerCase();
-
-      // Check installed apps list
-      const matchedApp = DEFAULT_INSTALLED_APPS.find(
-        (app) =>
-          targetQuery.includes(app.name.toLowerCase()) ||
-          app.name.toLowerCase().includes(targetQuery) ||
-          targetQuery.includes(app.id)
-      );
-
-      if (matchedApp) {
-        this.openApp(matchedApp);
-        return {
-          isLocalCommand: true,
-          actionTaken: `open_app_${matchedApp.id}`,
-          feedbackText: `Opening ${matchedApp.name}...`,
-          activeApp: matchedApp.name,
-        };
+      const target = openMatch[1]
+        .replace(/\b(the|app|app ta|ta|ta ke|ke|diye|de|to|please|jaldi)\b/g, ' ')
+        .trim();
+      // Only treat as an app command when the target is short & app-like —
+      // longer sentences go to the AI path (avoids false positives).
+      if (target && target.split(/\s+/).length <= 4) {
+        const app = appScanner.findApp(target);
+        if (app && this.isLaunchable(app)) {
+          const result = appScanner.launchApp(app);
+          if (result.actionType === 'builtin') {
+            // Built-in web tools (camera overlay etc.) — let the AI path handle.
+            return null;
+          }
+          return {
+            isLocalCommand: true,
+            actionTaken: `open_app_${app.name}`,
+            feedbackText: `${app.name} খুলছি...`,
+            activeApp: app.name,
+          };
+        }
       }
+    }
 
-      // Check special keywords
-      if (targetQuery.includes('youtube')) {
-        window.open('https://www.youtube.com', '_blank');
-        return {
-          isLocalCommand: true,
-          actionTaken: 'open_youtube',
-          feedbackText: 'Opening YouTube...',
-          activeApp: 'YouTube',
-        };
+    // ---------------------------------------------------------------
+    // 2. FLASHLIGHT / TORCH — real CameraManager torch
+    // ---------------------------------------------------------------
+    if (/(flashlight|torch|টর্চ|ফ্ল্যাশলাইট|আলোটা|টর্চটা)/.test(text)) {
+      const turnOn =
+        /(on|chalu|chalau|jalao|jala|on karo|চালু|জ্বালাও|জ্বালা|অন করো|বালিশ|বালি)/.test(text) && !/off/.test(text);
+      const turnOff = /(off|bandh|nibhao|nivao|off karo|বন্ধ|নিভাও|অফ করো)/.test(text);
+      if (turnOn || turnOff) {
+        const p = this.plugin();
+        if (p?.setTorch) {
+          try {
+            await p.setTorch({ on: turnOn });
+            return {
+              isLocalCommand: true,
+              actionTaken: turnOn ? 'torch_on' : 'torch_off',
+              feedbackText: turnOn ? 'টর্চ চালু করেছি জান।' : 'টর্চ বন্ধ করেছি।',
+            };
+          } catch {
+            return {
+              isLocalCommand: true,
+              actionTaken: 'torch_failed',
+              feedbackText: 'এই ফোনে টর্চ কন্ট্রোল করা যাচ্ছে না।',
+            };
+          }
+        }
       }
-      if (targetQuery.includes('whatsapp')) {
-        window.open('https://web.whatsapp.com', '_blank');
-        return {
-          isLocalCommand: true,
-          actionTaken: 'open_whatsapp',
-          feedbackText: 'Opening WhatsApp...',
-          activeApp: 'WhatsApp',
-        };
+    }
+
+    // ---------------------------------------------------------------
+    // 3. VOLUME — real AudioManager (native only; no fake numbers)
+    // ---------------------------------------------------------------
+    if (/(volume|ভলিউম|শব্দটা|sound|shobdo)/.test(text)) {
+      const up = /(up|increase|barao|badhao|bada karo|বাড়াও|বাড়াও|বেশি|high)/.test(text);
+      const down = /(down|decrease|komao|kam karo|koro|কমাও|কম|low|silent)/.test(text);
+      if (up !== down) {
+        const p = this.plugin();
+        if (p?.adjustVolume) {
+          try {
+            await p.adjustVolume({ direction: up ? 'up' : 'down' });
+            return {
+              isLocalCommand: true,
+              actionTaken: up ? 'volume_up' : 'volume_down',
+              feedbackText: up ? 'ভলিউম বাড়িয়েছি।' : 'ভলিউম কমিয়েছি।',
+            };
+          } catch {
+            /* fall through to AI path */
+          }
+        }
+        return null; // Never fake volume changes on the web.
       }
-      if (targetQuery.includes('play store') || targetQuery.includes('playstore')) {
-        window.open('https://play.google.com/store', '_blank');
+    }
+
+    // ---------------------------------------------------------------
+    // 4. SYSTEM SETTINGS — direct Settings intents
+    // ---------------------------------------------------------------
+    const settingMap: Array<[RegExp, string, string]> = [
+      [/(wifi|wi-fi|ওয়াইফাই|ওয়াই-ফাই)/, 'wifi', 'ওয়াইফাই সেটিংস খুলছি...'],
+      [/(bluetooth|ব্লুটুথ)/, 'bluetooth', 'ব্লুটুথ সেটিংস খুলছি...'],
+      [/(airplane|এয়ারপ্লেন|ফ্লাইট মোড)/, 'airplane', 'এয়ারপ্লেন মোড সেটিংস খুলছি...'],
+      [/(display|brightness|উজ্জ্বল|ডিসপ্লে)/, 'display', 'ডিসপ্লে সেটিংস খুলছি...'],
+      [/(location|লোকেশন|জিপিএস|gps)/, 'location', 'লোকেশন সেটিংস খুলছি...'],
+    ];
+    if (/(settings|setting|সেটিংস)/.test(text) || settingMap.some(([re]) => re.test(text))) {
+      for (const [re, key, feedback] of settingMap) {
+        if (re.test(text)) {
+          const p = this.plugin();
+          if (p?.openSystemSetting) {
+            try {
+              await p.openSystemSetting({ setting: key });
+              return { isLocalCommand: true, actionTaken: `open_${key}_settings`, feedbackText: feedback };
+            } catch {
+              /* fall through */
+            }
+          }
+        }
+      }
+      // Plain "settings kholo"
+      if (/(settings|setting|সেটিংস)/.test(text) && /(open|kholo|khulo|খোলো|খুলো|যাও)/.test(text)) {
+        const p = this.plugin();
+        if (p?.openSystemSetting) {
+          try {
+            await p.openSystemSetting({ setting: 'settings' });
+            return { isLocalCommand: true, actionTaken: 'open_settings', feedbackText: 'সেটিংস খুলছি...' };
+          } catch {
+            /* fall through */
+          }
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 5. TIMER / ALARM — real AlarmClock intent
+    // ---------------------------------------------------------------
+    if (/(timer|টাইমার|alarm|অ্যালার্ম|remind|মনে করিয়ে)/.test(text)) {
+      const durMatch = text.match(/(\d+)\s*(minute|minutes|min|মিনিট|second|seconds|sec|সেকেন্ড|hour|hours|ghanta|ghonta|ঘণ্টা|ঘন্টা)/i);
+      if (durMatch) {
+        const n = parseInt(durMatch[1], 10);
+        const unit = durMatch[2];
+        const seconds = /sec|সেকেন্ড/i.test(unit)
+          ? n
+          : /hour|ghonta|ghonta|ঘণ্টা|ঘন্টা/i.test(unit)
+            ? n * 3600
+            : n * 60;
+        const p = this.plugin();
+        if (p?.startTimer) {
+          try {
+            await p.startTimer({ seconds, label: 'MJ Timer' });
+            return {
+              isLocalCommand: true,
+              actionTaken: 'set_timer',
+              feedbackText: `${n} ${unit} এর টাইমার সেট করেছি।`,
+            };
+          } catch {
+            /* fall through */
+          }
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 6. SYSTEM NAVIGATION — Back / Home / Recents (Accessibility)
+    // ---------------------------------------------------------------
+    if (/(back|পিছনে|পিছনে যাও|pichone jao|ব্যাক)/.test(text) && /(go|jao|যাও|karo|back)/.test(text)) {
+      return await this.tryGlobalAction('back', 'ব্যাক করেছি।');
+    }
+    if (/(home|হোম|হোমে)/.test(text) && /(go|jao|যাও|home)/.test(text)) {
+      return await this.tryGlobalAction('home', 'হোমে চলে গেছি।');
+    }
+    if (/(recents|recent apps|রিসেন্ট|রিসেন্ট অ্যাপ)/.test(text)) {
+      return await this.tryGlobalAction('recents', 'রিসেন্ট অ্যাপ খুলছি...');
+    }
+
+    // ---------------------------------------------------------------
+    // 7. LOCAL INFO — time / date / battery (no model call)
+    // ---------------------------------------------------------------
+    if (/(what time|time koto|koto baje|কটা বাজে|ক'টা বাজে|সময় কত|কত সময়|current time)/.test(text)) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+      return {
+        isLocalCommand: true,
+        actionTaken: 'tell_time',
+        feedbackText: `এখন ${timeStr} বাজে জান।`,
+      };
+    }
+    if (/(what.*date|today.*date|আজ কত তারিখ|তারিখ কত|আজকের তারিখ)/.test(text)) {
+      const today = new Date().toLocaleDateString('bn-IN', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      });
+      return {
+        isLocalCommand: true,
+        actionTaken: 'tell_date',
+        feedbackText: `আজ ${today}।`,
+      };
+    }
+    if (/(battery|ব্যাটারি|চার্জ কত|charge koto)/.test(text)) {
+      const p = this.plugin();
+      if (p?.getDeviceStatus) {
+        try {
+          const status: any = await p.getDeviceStatus();
+          if (typeof status?.batteryLevel === 'number' && status.batteryLevel >= 0) {
+            const pct = status.batteryLevel;
+            const charging = status.charging ? ', চার্জে আছে' : '';
+            return {
+              isLocalCommand: true,
+              actionTaken: 'tell_battery',
+              feedbackText: `ব্যাটারি ${pct}%${charging}।`,
+            };
+          }
+        } catch {
+          /* fall through to AI path */
+        }
+      }
+      return null;
+    }
+
+    // ---------------------------------------------------------------
+    // 8. ACCESSIBILITY enable helper
+    // ---------------------------------------------------------------
+    if (/(accessibility|অ্যাক্সেসিবিলিটি)/.test(text) && /(open|enable|chalu|খোলো|on)/.test(text)) {
+      const p = this.plugin();
+      if (p?.openAccessibilitySettings) {
+        try {
+          await p.openAccessibilitySettings();
+          return {
+            isLocalCommand: true,
+            actionTaken: 'open_accessibility_settings',
+            feedbackText: 'Android Settings-এ MJ Android Agent খুঁজে Enable করো জান।',
+          };
+        } catch {
+          /* fall through */
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 9. PLAY STORE SEARCH
+    // ---------------------------------------------------------------
+    if (/(play store|playstore|প্লে স্টোর|প্লেস্টোর)/.test(text) && /(search|find|khojo|খোঁজো|খুঁজে)/.test(text)) {
+      const query = text
+        .replace(/play ?store|playstore|প্লে ?স্টোর|search|find|khojo|খোঁজো|খুঁজে|on|in|the|me|মে|e/gi, ' ')
+        .trim();
+      if (query) {
+        appScanner.openExternalUrl(
+          `https://play.google.com/store/search?q=${encodeURIComponent(query)}&c=apps`
+        );
         return {
           isLocalCommand: true,
-          actionTaken: 'open_playstore',
-          feedbackText: 'Opening Google Play Store...',
+          actionTaken: 'playstore_search',
+          feedbackText: `Play Store-এ ${query} খুঁজছি...`,
           activeApp: 'Play Store',
         };
       }
     }
 
-    // 2. Play Store search (e.g. "Find WhatsApp on Play Store", "Play Store me WhatsApp khojo")
-    if (text.includes('play store') && (text.includes('find') || text.includes('search') || text.includes('khojo'))) {
-      const query = text.replace(/play store|find|search|on|in|khojo/gi, '').trim();
-      const searchUrl = `https://play.google.com/store/search?q=${encodeURIComponent(query)}&c=apps`;
-      window.open(searchUrl, '_blank');
-      return {
-        isLocalCommand: true,
-        actionTaken: 'playstore_search',
-        feedbackText: `Searching for ${query} on Google Play Store...`,
-        activeApp: 'Play Store',
-      };
-    }
-
-    // 3. WhatsApp Message drafting (Consequential Action -> Confirmation Required)
-    const msgMatch = text.match(/(?:send|bhejo|message)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?(?:to\s+)?([a-z0-9]+)\s+(?:saying\s+|that\s+|bolke\s+)?(.*)/i) ||
-                     text.match(/([a-z0-9]+)\s+(?:ko|ke)\s+(?:message|whatsapp)\s+(?:bhejo|karo)\s*(.*)/i);
-    if (msgMatch && msgMatch[1]) {
+    // ---------------------------------------------------------------
+    // 10. CONSEQUENTIAL ACTIONS — WhatsApp draft & phone call
+    //     (explicit confirmation required before execution)
+    // ---------------------------------------------------------------
+    const msgMatch =
+      text.match(/(?:send|bhejo|message)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?(?:to\s+)?([a-z0-9]+)\s+(?:saying\s+|that\s+|bolke\s+)?(.*)/i) ||
+      text.match(/([a-z0-9]+)\s+(?:ko|ke)\s+(?:message|whatsapp)\s+(?:bhejo|karo)\s*(.*)/i);
+    if (msgMatch && msgMatch[1] && /(whatsapp|message|মেসেজ)/.test(text)) {
       const recipient = msgMatch[1].trim();
-      const messageBody = msgMatch[2] ? msgMatch[2].trim() : "I'll be there shortly.";
-
+      const messageBody = msgMatch[2] ? msgMatch[2].trim() : 'I will be there shortly.';
       const task: ActiveTask = {
         id: `task_${Date.now()}`,
         goal: `Send WhatsApp message to ${recipient}`,
         status: 'waiting-confirmation',
         currentStepIndex: 0,
-        confirmationPrompt: `Send WhatsApp message to ${recipient}: "${messageBody}"?`,
+        confirmationPrompt: `${recipient}-কে WhatsApp-এ এই মেসেজটা পাঠাবো: "${messageBody}"?`,
         steps: [
           { id: '1', title: `Resolve contact ${recipient}`, actionType: 'resolve_contact', status: 'completed', verified: true },
           { id: '2', title: 'Compose message draft', actionType: 'draft_message', status: 'completed', verified: true },
           { id: '3', title: `Send message to ${recipient}`, actionType: 'send_whatsapp', status: 'pending', verified: false, details: messageBody },
         ],
         onConfirm: async () => {
-          const encoded = encodeURIComponent(messageBody);
-          window.open(`https://api.whatsapp.com/send?text=${encoded}`, '_blank');
+          appScanner.openExternalUrl(`https://api.whatsapp.com/send?text=${encodeURIComponent(messageBody)}`);
         },
       };
-
       return {
         isLocalCommand: true,
         actionTaken: 'draft_whatsapp_message',
-        feedbackText: `I have prepared the message for ${recipient}. Please confirm to send.`,
+        feedbackText: `${recipient}-এর জন্য মেসেজ রেডি করেছি জান। Confirm করো তাহলে পাঠাবো।`,
         requiresConfirmation: true,
         confirmationTask: task,
       };
     }
 
-    // 4. Calling contact (Consequential Action -> Confirmation Required)
-    const callMatch = text.match(/(?:call|phone|ring)\s+([a-z0-9\s]+)/i);
+    const callMatch = text.match(/(?:call|phone|ring|কল করো)\s+([a-z0-9\s]+)/i);
     if (callMatch && callMatch[1]) {
-      const person = callMatch[1].replace(/mom|dad|home|work/i, (m) => m).trim();
-
-      const task: ActiveTask = {
-        id: `task_${Date.now()}`,
-        goal: `Call ${person}`,
-        status: 'waiting-confirmation',
-        currentStepIndex: 0,
-        confirmationPrompt: `Place phone call to ${person}?`,
-        steps: [
-          { id: '1', title: `Resolve contact for ${person}`, actionType: 'resolve_contact', status: 'completed', verified: true },
-          { id: '2', title: `Initiate telephony dialer`, actionType: 'dial_phone', status: 'pending', verified: false },
-        ],
-        onConfirm: async () => {
-          window.location.href = `tel:${encodeURIComponent(person)}`;
-        },
-      };
-
-      return {
-        isLocalCommand: true,
-        actionTaken: 'prepare_call',
-        feedbackText: `Ready to call ${person}. Please confirm below.`,
-        requiresConfirmation: true,
-        confirmationTask: task,
-      };
-    }
-
-    // 5. Device Controls: Flashlight (Torch)
-    if (text.includes('flashlight') || text.includes('torch')) {
-      if (text.includes('on') || text.includes('chalu') || text.includes('jalao')) {
-        await this.toggleTorch(true);
+      const person = callMatch[1].replace(/\b(mom|dad|home|work)\b/gi, (m) => m).trim();
+      if (person) {
+        const task: ActiveTask = {
+          id: `task_${Date.now()}`,
+          goal: `Call ${person}`,
+          status: 'waiting-confirmation',
+          currentStepIndex: 0,
+          confirmationPrompt: `${person}-কে কল করবো?`,
+          steps: [
+            { id: '1', title: `Resolve contact for ${person}`, actionType: 'resolve_contact', status: 'completed', verified: true },
+            { id: '2', title: 'Initiate telephony dialer', actionType: 'dial_phone', status: 'pending', verified: false },
+          ],
+          onConfirm: async () => {
+            window.location.href = `tel:${encodeURIComponent(person.replace(/\s+/g, ''))}`;
+          },
+        };
         return {
           isLocalCommand: true,
-          actionTaken: 'torch_on',
-          feedbackText: 'Flashlight turned on.',
+          actionTaken: 'prepare_call',
+          feedbackText: `${person}-কে কল করার জন্য রেডি জান। Confirm করো।`,
+          requiresConfirmation: true,
+          confirmationTask: task,
         };
       }
-      if (text.includes('off') || text.includes('bandh') || text.includes('nibhao')) {
-        await this.toggleTorch(false);
-        return {
-          isLocalCommand: true,
-          actionTaken: 'torch_off',
-          feedbackText: 'Flashlight turned off.',
-        };
-      }
-    }
-
-    // 6. Device Controls: Volume
-    if (text.includes('volume')) {
-      if (text.includes('up') || text.includes('increase') || text.includes('barao') || text.includes('badhao')) {
-        this.volumeLevel = Math.min(100, this.volumeLevel + 15);
-        return {
-          isLocalCommand: true,
-          actionTaken: 'volume_up',
-          feedbackText: `Volume increased to ${this.volumeLevel}%.`,
-        };
-      }
-      if (text.includes('down') || text.includes('decrease') || text.includes('komao') || text.includes('kam karo')) {
-        this.volumeLevel = Math.max(0, this.volumeLevel - 15);
-        return {
-          isLocalCommand: true,
-          actionTaken: 'volume_down',
-          feedbackText: `Volume decreased to ${this.volumeLevel}%.`,
-        };
-      }
-    }
-
-    // 7. Navigation: Scroll up / down, Back, Home
-    if (text.match(/scroll\s+(?:down|niche)/i)) {
-      window.scrollBy({ top: 350, behavior: 'smooth' });
-      return {
-        isLocalCommand: true,
-        actionTaken: 'scroll_down',
-        feedbackText: 'Scrolling down.',
-      };
-    }
-    if (text.match(/scroll\s+(?:up|upore)/i)) {
-      window.scrollBy({ top: -350, behavior: 'smooth' });
-      return {
-        isLocalCommand: true,
-        actionTaken: 'scroll_up',
-        feedbackText: 'Scrolling up.',
-      };
-    }
-    if (text.match(/(?:go\s+)?back|piche/i)) {
-      window.history.back();
-      return {
-        isLocalCommand: true,
-        actionTaken: 'navigate_back',
-        feedbackText: 'Navigating back.',
-      };
     }
 
     return null;
   }
 
-  private openApp(app: InstalledApp) {
-    if (app.scheme) {
+  /** Executes an AccessibilityService global action (Back/Home/Recents). */
+  private async tryGlobalAction(action: 'back' | 'home' | 'recents', feedback: string): Promise<LocalCommandResult | null> {
+    const p = this.plugin();
+    if (p?.globalAction) {
       try {
-        window.location.href = app.scheme;
-        return;
-      } catch {}
+        await p.globalAction({ action });
+        return { isLocalCommand: true, actionTaken: `global_${action}`, feedbackText: feedback };
+      } catch {
+        return {
+          isLocalCommand: true,
+          actionTaken: 'needs_accessibility',
+          feedbackText: 'এই কাজের জন্য Accessibility চালু করতে হবে জান — Settings → Accessibility → MJ Android Agent।',
+        };
+      }
     }
-    window.open(app.webUrl, '_blank');
+    return null; // Web has no system navigation — AI path.
   }
 
-  private async toggleTorch(turnOn: boolean) {
-    this.isFlashlightOn = turnOn;
-    try {
-      if (turnOn) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-        });
-        this.torchStream = stream;
-        const track = stream.getVideoTracks()[0];
-        const imageCapture = (track as unknown as { applyConstraints: (c: unknown) => Promise<void> });
-        if (imageCapture.applyConstraints) {
-          await imageCapture.applyConstraints({
-            advanced: [{ torch: true }],
-          });
-        }
-      } else {
-        if (this.torchStream) {
-          this.torchStream.getTracks().forEach((t) => t.stop());
-          this.torchStream = null;
-        }
-      }
-    } catch {
-      // Graceful fallback for devices without physical torch hardware support
-      console.log(`Simulated torch state: ${turnOn ? 'ON' : 'OFF'}`);
-    }
+  /** Only real installed apps (with packageName) or web-launchable entries. */
+  private isLaunchable(app: AppDefinition): boolean {
+    if (app.isBuiltInTool) return false;
+    if (app.packageName) return true;
+    return app.url.startsWith('http');
   }
 }
 

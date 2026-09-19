@@ -13,6 +13,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { liveSession, LiveSessionState, AppActionPayload } from './services/liveSession';
 import { appScanner } from './services/appScanner';
+import { LocalCommandResult } from './services/localCommandEngine';
+import { ActiveTask } from './types';
 import { wakeWordDetector } from './services/wakeWordDetector';
 import { IosTopBar } from './components/voice/IosTopBar';
 import { JarvisArcOrb } from './components/voice/JarvisArcOrb';
@@ -21,6 +23,7 @@ import { IosSettingsModal } from './components/voice/IosSettingsModal';
 import { IosAppLaunchSheet } from './components/voice/IosAppLaunchSheet';
 import { VoiceVisualizer } from './components/voice/VoiceVisualizer';
 import { OnboardingModal } from './components/onboarding/OnboardingModal';
+import { ActionConfirmationModal } from './components/modals/ActionConfirmationModal';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function App() {
@@ -34,10 +37,13 @@ export default function App() {
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
   const [activeAppAction, setActiveAppAction] = useState<AppActionPayload | null>(null);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [pendingConfirmTask, setPendingConfirmTask] = useState<ActiveTask | null>(null);
 
   // Check onboarding on initial mount
   useEffect(() => {
-    const isCompleted = localStorage.getItem('mj_onboarding_completed');
+    // One-time onboarding per app version — fresh installs AND users who
+    // upgraded (their old "completed" flag doesn't carry over the version bump)
+    const isCompleted = localStorage.getItem('mj_onboarding_completed_v2');
     if (!isCompleted) {
       setIsOnboardingOpen(true);
     }
@@ -104,6 +110,17 @@ export default function App() {
     setActiveAppAction(action);
   }, []);
 
+  // FAST LOCAL PATH results — instant feedback + confirmation flow for
+  // consequential actions (WhatsApp message / phone call).
+  const handleLocalCommand = useCallback((result: LocalCommandResult) => {
+    // Show the instant local acknowledgement under the orb
+    setMjSpeech(result.feedbackText);
+    // Surface consequential actions for explicit user confirmation
+    if (result.requiresConfirmation && result.confirmationTask) {
+      setPendingConfirmTask(result.confirmationTask);
+    }
+  }, []);
+
   // Connect or disconnect voice session
   const toggleSession = async () => {
 
@@ -128,6 +145,7 @@ export default function App() {
         },
         onTranscript: handleTranscript,
         onAppAction: handleAppAction,
+        onLocalCommand: handleLocalCommand,
         onInterrupted: handleInterrupted,
         onError: (err) => {
           setErrorMessage(err);
@@ -247,6 +265,19 @@ export default function App() {
       <IosAppLaunchSheet
         appAction={activeAppAction}
         onClose={() => setActiveAppAction(null)}
+      />
+
+      {/* Consequential Action Confirmation (WhatsApp / Call) */}
+      <ActionConfirmationModal
+        task={pendingConfirmTask}
+        onConfirm={() => {
+          const task = pendingConfirmTask;
+          setPendingConfirmTask(null);
+          if (task?.onConfirm) {
+            void task.onConfirm();
+          }
+        }}
+        onCancel={() => setPendingConfirmTask(null)}
       />
     </div>
   );

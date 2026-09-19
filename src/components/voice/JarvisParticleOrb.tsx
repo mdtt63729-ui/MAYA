@@ -719,11 +719,7 @@ export const JarvisParticleOrb: React.FC<JarvisParticleOrbProps> = ({
         <motion.button
           onClick={onTogglePower}
           whileTap={{ scale: 0.92 }}
-          className="absolute z-20 w-14 h-14 rounded-full bg-black/45 hover:bg-black/65 border backdrop-blur-md flex items-center justify-center text-white transition-all group"
-          style={{
-            borderColor: `${accent}66`,
-            boxShadow: `0 0 18px ${accent}59`,
-          }}
+          className="absolute z-20 w-14 h-14 rounded-full bg-black/45 hover:bg-black/65 flex items-center justify-center text-white transition-all group"
           title={state === 'disconnected' ? 'Tap to start voice assistant' : isMuted ? 'Muted' : 'Tap to stop'}
           aria-label="Toggle Assistant"
         >

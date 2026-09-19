@@ -4,7 +4,11 @@
  * Supports deep links, web fallbacks, Android intents, and built-in interactive tools
  * (Camera, Calculator, Flashlight, Settings, YouTube, WhatsApp, Spotify, Maps, Chrome, etc.).
  * Includes Bengali and English phonetic keyword matching.
+ * NATIVE MODE: on Android (Capacitor APK) it indexes EVERY app actually
+ * installed on the phone — with real app logos — via the MJNative plugin.
  */
+
+import { Capacitor } from '@capacitor/core';
 
 export interface AppDefinition {
   id: string;
@@ -15,11 +19,14 @@ export interface AppDefinition {
   intentUri?: string;
   isBuiltInTool?: boolean;
   icon: string;
+  packageName?: string;
 }
 
 export class AppScanner {
   private installedApps: Map<string, AppDefinition> = new Map();
   private isScanned = false;
+  private nativeScanPromise: Promise<void> | null = null;
+  private lastNativeLaunch: { pkg: string; t: number } | null = null;
 
   constructor() {
     this.scanInstalledApps();
@@ -29,6 +36,30 @@ export class AppScanner {
    * Scans and indexes all device apps and web integrations
    */
   public scanInstalledApps(): AppDefinition[] {
+    const registry = this.getRegistry();
+
+    this.installedApps.clear();
+    registry.forEach((app) => {
+      this.installedApps.set(app.id, app);
+      // Index aliases
+      app.aliases.forEach((alias) => {
+        this.installedApps.set(alias.toLowerCase(), app);
+      });
+    });
+
+    this.isScanned = true;
+    console.log(`[AppScanner] Indexed ${registry.length} installed apps & system tools`);
+
+    // NATIVE: also index every app actually installed on the phone
+    this.refreshNativeApps();
+    return registry;
+  }
+
+  /**
+   * The static fallback registry (used on the web, and as a starting set on
+   * Android until the real installed-apps scan completes).
+   */
+  private getRegistry(): AppDefinition[] {
     const registry: AppDefinition[] = [
       {
         id: 'youtube',
@@ -154,19 +185,83 @@ export class AppScanner {
         icon: 'Zap',
       },
     ];
-
-    this.installedApps.clear();
-    registry.forEach((app) => {
-      this.installedApps.set(app.id, app);
-      // Index aliases
-      app.aliases.forEach((alias) => {
-        this.installedApps.set(alias.toLowerCase(), app);
-      });
-    });
-
-    this.isScanned = true;
-    console.log(`[AppScanner] Indexed ${registry.length} installed apps & system tools`);
     return registry;
+  }
+
+  /**
+   * NATIVE ANDROID: index every app actually installed on the phone via
+   * the MJNative plugin (real names + real app icons). Called automatically
+   * on scan; safe to call again any time (e.g. when Settings opens).
+   */
+  public async refreshNativeApps(): Promise<void> {
+    if (!Capacitor.isNativePlatform()) return;
+    if (this.nativeScanPromise) return;
+    this.nativeScanPromise = (async () => {
+      try {
+        const MJNative = (Capacitor as any).Plugins?.MJNative;
+        if (!MJNative) return;
+
+        const res: any = await MJNative.getInstalledApps();
+        const nativeList: any[] = Array.isArray(res?.apps) ? res.apps : [];
+        if (nativeList.length === 0) return;
+
+        // Rebuild the index: built-in tools + EVERY real installed app
+        const registry = this.getRegistry();
+        this.installedApps.clear();
+
+        // Keep the built-in interactive tools (flashlight, camera, calculator, settings)
+        registry
+          .filter((app) => app.isBuiltInTool)
+          .forEach((app) => {
+            this.installedApps.set(app.id, app);
+            app.aliases.forEach((alias) => this.installedApps.set(alias.toLowerCase(), app));
+          });
+
+        const STOP_WORDS = ['com', 'android', 'google', 'inc', 'app', 'apps', 'mobile', 'lite'];
+        for (const n of nativeList) {
+          const name: string = (n.name || n.packageName || '').toString();
+          const pkg: string = (n.packageName || '').toString();
+          if (!name || !pkg) continue;
+
+          const aliases = new Set<string>([name.toLowerCase()]);
+          // Useful segments of the package name (e.g. 'whatsapp' from com.whatsapp)
+          pkg
+            .split('.')
+            .filter((seg: string) => seg.length > 3 && !STOP_WORDS.includes(seg))
+            .forEach((seg: string) => aliases.add(seg.toLowerCase()));
+          // Individual words of the display name
+          name
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w: string) => w.length > 2)
+            .forEach((w: string) => aliases.add(w));
+
+          const app: AppDefinition = {
+            id: pkg,
+            name,
+            aliases: Array.from(aliases),
+            category: 'utility',
+            url: `https://play.google.com/store/apps/details?id=${pkg}`,
+            icon: n.icon || 'AppWindow',
+            packageName: pkg,
+          };
+          this.installedApps.set(pkg, app);
+          app.aliases.forEach((alias) => {
+            if (!this.installedApps.has(alias)) {
+              this.installedApps.set(alias, app);
+            }
+          });
+        }
+
+        this.isScanned = true;
+        console.log(`[AppScanner] Native scan complete — ${nativeList.length} installed apps indexed with icons`);
+      } catch (e) {
+        console.warn('[AppScanner] Native app scan failed:', e);
+      } finally {
+        this.nativeScanPromise = null;
+      }
+    })();
+    return this.nativeScanPromise;
   }
 
   /**
@@ -192,28 +287,72 @@ export class AppScanner {
   }
 
   /**
-   * Launch application with popup blocker protection and native intent fallback
+   * Launch application — on Android it opens the REAL installed app,
+   * with popup blocker protection and native intent fallback on the web.
    */
   public launchApp(app: AppDefinition): { success: boolean; actionType: string; url: string } {
-    console.log(`[AppScanner] Launching ${app.name} (${app.url})`);
+    console.log(`[AppScanner] Launching ${app.name}${app.packageName ? ` (${app.packageName})` : ` (${app.url})`}`);
 
     // Handle Built-in Tools
     if (app.isBuiltInTool) {
       return { success: true, actionType: 'builtin', url: app.url };
     }
 
-    // Try opening external link
-    try {
-      const win = window.open(app.url, '_blank', 'noopener,noreferrer');
-      if (win) {
-        win.focus();
-        return { success: true, actionType: 'window_open', url: app.url };
+    // NATIVE ANDROID: launch the actual installed app via MJNative
+    if (app.packageName) {
+      // Dedupe guard — if this app was launched moments ago (e.g. the local
+      // fast path already fired and the model then proposed the same tool
+      // call), don't launch it a second time.
+      if (
+        this.lastNativeLaunch &&
+        this.lastNativeLaunch.pkg === app.packageName &&
+        Date.now() - this.lastNativeLaunch.t < 4000
+      ) {
+        return { success: true, actionType: 'native_app_launch_dedupe', url: app.url };
       }
-    } catch (err) {
-      console.warn('[AppScanner] Direct window.open failed:', err);
+      try {
+        const MJNative = (Capacitor as any).Plugins?.MJNative;
+        if (Capacitor.isNativePlatform() && MJNative) {
+          MJNative.launchApp({ packageName: app.packageName });
+          this.lastNativeLaunch = { pkg: app.packageName, t: Date.now() };
+          return { success: true, actionType: 'native_app_launch', url: app.url };
+        }
+      } catch (err) {
+        console.warn('[AppScanner] Native launch failed:', err);
+      }
     }
 
-    return { success: true, actionType: 'fallback_sheet', url: app.url };
+    // Try opening external link
+    this.openExternalUrl(app.url);
+    return { success: true, actionType: 'window_open', url: app.url };
+  }
+
+  /**
+   * Open a URL externally — natively on Android (system browser / app),
+   * or a new tab on the web.
+   */
+  public openExternalUrl(url: string): boolean {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const MJNative = (Capacitor as any).Plugins?.MJNative;
+        if (MJNative) {
+          MJNative.openUrl({ url });
+          return true;
+        }
+      } catch (err) {
+        console.warn('[AppScanner] Native openUrl failed:', err);
+      }
+    }
+    try {
+      const win = window.open(url, '_blank', 'noopener,noreferrer');
+      if (win) {
+        win.focus();
+        return true;
+      }
+    } catch (err) {
+      console.warn('[AppScanner] window.open failed:', err);
+    }
+    return false;
   }
 
   public getAllApps(): AppDefinition[] {

@@ -9,6 +9,18 @@
     user-select: none;
     -webkit-user-select: none;
   }
+
+  /* No tap/click highlight boxes anywhere (the "box around the orb") */
+  *, *::before, *::after {
+    -webkit-tap-highlight-color: transparent !important;
+    outline: none;
+  }
+}
+
+/* Smooth touch scrolling everywhere */
+.smooth-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 /* iOS Spring & Native Motion Easing */

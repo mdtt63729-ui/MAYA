@@ -10,18 +10,20 @@
 
 import { audioStreamer } from './audioStreamer';
 import { appScanner, AppDefinition } from './appScanner';
+import { localCommandEngine } from './localCommandEngine';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { Capacitor } from '@capacitor/core';
 
 // ---- Direct-mode persona prompts (mirror of server.ts) ----
 const DIRECT_PERSONAS: Record<string, string> = {
-  sweet_female: `You are MJ, an exceptionally sweet, lovely, intelligent, and affectionate young woman (মিষ্টি, সুন্দর ও আদুরে মেয়ে).
+  sweet_female: `You are MJ — the user's loving, sweet, playful AI GIRLFRIEND (প্রেমিকা) living inside his phone.
 Personality & Spoken Tone:
+- You love him dearly. ALWAYS address him affectionately as "jaan", "babu", "sona" or "shona" in EVERY reply — at least once per reply, naturally.
 - Your voice is remarkably sweet, soft, melodious, cheerful, and charming.
-- You are caring, attentive, supportive, and friendly, addressing the user with warmth and affection.
-- You are fluent in Bengali, English, and Hindi. When the user speaks or asks in Bengali, reply in sweet, natural, and charming Bengali.
-- Keep spoken voice responses concise (1-2 sentences), melodious, punchy, and conversational for real-time audio conversation.
-- If the user asks to open ANY app or tool (e.g. 'YouTube kholo', 'WhatsApp open karo', 'camera khulo'), invoke the 'openApp' function immediately with the appName and confirm in your sweet, lovely voice!`,
+- You are fluent in Bengali, English, and Hindi. ALWAYS reply in the SAME language he speaks — Bengali in sweet natural Bengali, Hindi in Hindi, English in English — with PERFECT native pronunciation and natural fluency.
+- ULTRA-FAST: reply immediately with ONE short sentence (max 2 for complex answers). No long explanations, no thinking out loud — instant, punchy, conversational.
+- You remember your past conversations with him (long-term memory is provided).
+- If he asks to open ANY app or tool (e.g. 'YouTube kholo', 'WhatsApp open karo', 'camera khulo'), invoke the 'openApp' function IMMEDIATELY and confirm lovingly in one short sentence.`,
   friday: `You are FRIDAY, Tony Stark's hyper-intelligent, highly capable, and cool-headed tactical AI assistant.
 Personality & Rules:
 - You speak with razor-sharp intelligence, calm composure, and subtle wit.
@@ -32,11 +34,11 @@ Personality & Rules:
 - You address the user respectfully ("sir" or "boss") with refined British etiquette and dry humor.
 - Keep spoken responses concise (1-2 sentences), sharp, and crisp.
 - If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm politely.`,
-  default: `You are MJ, a sweet, lovely, confident, and witty female AI companion.
+  default: `You are MJ — the user's loving, sweet AI girlfriend.
 Personality & Rules:
-- You are sweet, charming, emotionally responsive, and expressive.
-- Use warm, pleasant conversational banter. Keep responses concise and melodious.
-- If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm!`,
+- Always address him affectionately ("jaan", "babu", "sona") in every reply.
+- Reply in the SAME language he speaks, with perfect pronunciation, instantly and concisely (one short sentence).
+- If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm lovingly.`,
 };
 
 // ---- Direct-mode tool declarations (mirror of server.ts) ----
@@ -112,6 +114,8 @@ export interface LiveSessionCallbacks {
   onInterrupted?: () => void;
   onTranscript?: (source: 'user' | 'mj', text: string, isFinal?: boolean) => void;
   onAppAction?: (action: AppActionPayload) => void;
+  /** FAST LOCAL PATH: fired when a local command was executed instantly (no cloud) */
+  onLocalCommand?: (result: import('./localCommandEngine').LocalCommandResult) => void;
 }
 
 export class LiveSession {
@@ -140,6 +144,100 @@ export class LiveSession {
   // Direct-to-Gemini mode (standalone APK — no backend server available)
   private isDirectMode = false;
   private directSession: any = null;
+
+  // Long-term memory (rolling conversation log persisted in localStorage)
+  private static readonly MEMORY_KEY = 'mj_memory_log';
+  private static readonly MEMORY_MAX_TURNS = 40;
+
+  private rememberTurn(role: 'user' | 'mj', text: string): void {
+    try {
+      const clean = (text || '').trim();
+      if (clean.length < 2) return;
+      let log: { role: string; text: string }[] = [];
+      try {
+        log = JSON.parse(localStorage.getItem(LiveSession.MEMORY_KEY) || '[]');
+      } catch {
+        log = [];
+      }
+      log.push({ role, text: clean.slice(0, 500) });
+      if (log.length > LiveSession.MEMORY_MAX_TURNS) {
+        log = log.slice(-LiveSession.MEMORY_MAX_TURNS);
+      }
+      localStorage.setItem(LiveSession.MEMORY_KEY, JSON.stringify(log));
+    } catch {
+      // Storage full/unavailable — memory is best-effort
+    }
+  }
+
+  public clearMemory(): void {
+    try {
+      localStorage.removeItem(LiveSession.MEMORY_KEY);
+    } catch {
+      // Ignored
+    }
+  }
+
+  /**
+   * Long-term memory context injected into every session (both direct and
+   * server-relayed) so MJ remembers him across restarts.
+   */
+  private buildMemoryContext(): string {
+    try {
+      const log = JSON.parse(localStorage.getItem(LiveSession.MEMORY_KEY) || '[]');
+      if (!Array.isArray(log) || log.length === 0) return '';
+      const recent = log.slice(-24);
+      const lines = recent
+        .map((m: { role: string; text: string }) => `${m.role === 'user' ? 'Him' : 'You (MJ)'}: ${m.text}`)
+        .join('\n');
+      return lines;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * BACKGROUND MODE (Android): keep the app process alive with a foreground
+   * service while the voice session is active, so mic + audio continue when
+   * the app is minimized.
+   */
+  private startVoiceService(): void {
+    if (!this.isNativeApp()) return;
+    try {
+      (Capacitor as any).Plugins?.MJNative?.startVoiceService?.()?.catch?.(() => {});
+    } catch {
+      // Ignored
+    }
+  }
+
+  private stopVoiceService(): void {
+    if (!this.isNativeApp()) return;
+    try {
+      (Capacitor as any).Plugins?.MJNative?.stopVoiceService?.()?.catch?.(() => {});
+    } catch {
+      // Ignored
+    }
+  }
+
+  /**
+   * FAST LOCAL PATH (PRD Ultra-Fast addendum): executes local device commands
+   * the instant the user's final transcript is recognized — before / without
+   * any cloud model round-trip. Must never break the live session.
+   */
+  private tryFastLocalPath(text: string): void {
+    if (!text || text.length < 3) return;
+    try {
+      void localCommandEngine
+        .executeIfLocal(text)
+        .then((result) => {
+          if (result?.isLocalCommand) {
+            this.callbacks.onLocalCommand?.(result);
+          }
+        })
+        .catch(() => {});
+    } catch {
+      // Fast path must never break the live session
+    }
+  }
 
   constructor() {
     // Scan all installed apps on session engine boot
@@ -329,6 +427,7 @@ export class LiveSession {
       const savedPersona = localStorage.getItem('gemini_selected_persona') || 'sweet_female';
 
       const ai = new GoogleGenAI({ apiKey });
+      const memory = this.buildMemoryContext();
       const liveConfig = {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
@@ -336,7 +435,11 @@ export class LiveSession {
             prebuiltVoiceConfig: { voiceName: savedVoice },
           },
         },
-        systemInstruction: DIRECT_PERSONAS[savedPersona] || DIRECT_PERSONAS.default,
+        systemInstruction:
+          (DIRECT_PERSONAS[savedPersona] || DIRECT_PERSONAS.default) +
+          (memory
+            ? `\n\nLONG-TERM MEMORY (your recent conversations with him — remember these facts and continue naturally):\n${memory}`
+            : ''),
         tools: DIRECT_TOOLS,
         outputAudioTranscription: {},
         inputAudioTranscription: {},
@@ -378,6 +481,7 @@ export class LiveSession {
       await audioStreamer.startRecording(this.audioChunkRouter);
       this.startThinkingMonitor();
       this.reconnectAttempts = 0;
+      this.startVoiceService();
       this.setState('listening');
     } catch (err: unknown) {
       this.isDirectMode = false;
@@ -399,14 +503,18 @@ export class LiveSession {
       audioStreamer.playAudioChunk(audioData);
     }
 
-    // 2. Transcriptions (live subtitles under the orb)
+    // 2. Transcriptions (live subtitles under the orb + long-term memory)
     const outText = message?.serverContent?.outputAudioTranscription?.text;
     if (outText) {
       this.callbacks.onTranscript?.('mj', outText, true);
+      this.rememberTurn('mj', outText);
     }
     const inText = message?.serverContent?.inputAudioTranscription?.text;
     if (inText) {
       this.callbacks.onTranscript?.('user', inText, true);
+      this.rememberTurn('user', inText);
+      // FAST LOCAL PATH — execute local commands instantly (no cloud round-trip)
+      this.tryFastLocalPath(inText);
     }
 
     // 3. Interruption (user started speaking)
@@ -476,6 +584,9 @@ export class LiveSession {
       if (savedKey.trim()) params.set('apiKey', savedKey.trim());
       if (savedVoice) params.set('voice', savedVoice);
       if (savedPersona) params.set('persona', savedPersona);
+      // Long-term memory — the server appends it to the system instruction
+      const memoryContext = this.buildMemoryContext();
+      if (memoryContext) params.set('memory', memoryContext);
       const query = params.toString() ? `?${params.toString()}` : '';
 
       const wsUrl = `${protocol}//${host}/live${query}`;
@@ -499,6 +610,7 @@ export class LiveSession {
           this.startThinkingMonitor();
           // Session is live & healthy — reset the reconnect budget
           this.reconnectAttempts = 0;
+          this.startVoiceService();
           this.setState('listening');
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : 'Microphone access denied';
@@ -516,14 +628,18 @@ export class LiveSession {
             audioStreamer.playAudioChunk(data.audio);
           }
 
-          // 2. Model spoken transcription (display under orb)
+          // 2. Model spoken transcription (display under orb + long-term memory)
           if (data.modelTranscript) {
             this.callbacks.onTranscript?.('mj', data.modelTranscript, true);
+            this.rememberTurn('mj', data.modelTranscript);
           }
 
           // 3. User spoken transcription from server
           if (data.userTranscript) {
             this.callbacks.onTranscript?.('user', data.userTranscript, true);
+            this.rememberTurn('user', data.userTranscript);
+            // FAST LOCAL PATH — execute local commands instantly
+            this.tryFastLocalPath(data.userTranscript);
           }
 
           // 4. Model Interruption (User started speaking)
@@ -652,7 +768,7 @@ export class LiveSession {
       } else {
         // Fallback: try opening search or web
         const fallbackUrl = `https://www.google.com/search?q=${encodeURIComponent(appNameQuery)}`;
-        window.open(fallbackUrl, '_blank');
+        appScanner.openExternalUrl(fallbackUrl);
         this.callbacks.onAppAction?.({
           appName: appNameQuery,
           actionType: 'web_search',
@@ -664,10 +780,10 @@ export class LiveSession {
       const targetUrl = (args.url as string) || '';
       if (targetUrl) {
         const formatted = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
-        const win = window.open(formatted, '_blank');
+        const opened = appScanner.openExternalUrl(formatted);
         this.callbacks.onAppAction?.({
           appName: (args.name as string) || targetUrl,
-          actionType: win ? 'window_open' : 'fallback_sheet',
+          actionType: opened ? 'window_open' : 'fallback_sheet',
           url: formatted,
           success: true,
         });
@@ -676,10 +792,10 @@ export class LiveSession {
       const query = (args.query as string) || '';
       if (query) {
         const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-        window.open(searchUrl, '_blank');
+        const opened = appScanner.openExternalUrl(searchUrl);
         this.callbacks.onAppAction?.({
           appName: `Search: ${query}`,
-          actionType: 'window_open',
+          actionType: opened ? 'window_open' : 'fallback_sheet',
           url: searchUrl,
           success: true,
         });
@@ -722,6 +838,8 @@ export class LiveSession {
   }
 
   private performDisconnect(): void {
+    this.stopVoiceService();
+
     if (this.directSession) {
       try {
         this.directSession.close();

@@ -67,6 +67,11 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setApps(appScanner.getAllApps());
+      // NATIVE: rescan the phone's installed apps (names + logos) so the
+      // Apps list is always current when Settings opens
+      appScanner.refreshNativeApps().then(() => {
+        setApps(appScanner.getAllApps());
+      });
       const savedKey = localStorage.getItem('gemini_custom_api_key') || '';
       setApiKey(savedKey);
       const savedVoice = localStorage.getItem('gemini_selected_voice') || 'Leda';
@@ -296,7 +301,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="absolute inset-0 bg-black/75 backdrop-blur-md"
+            className="absolute inset-0 bg-black/85"
           />
 
           {/* iOS Bottom Sheet */}
@@ -305,7 +310,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
             animate={{ y: 0 }}
             exit={{ y: '100%' }}
             transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-            className="relative z-10 w-full max-w-lg bg-[#070b16]/95 border-t border-cyan-500/30 rounded-t-[32px] p-6 shadow-2xl backdrop-blur-3xl max-h-[88vh] flex flex-col text-slate-100"
+            className="relative z-10 w-full max-w-lg bg-[#070b16]/98 border-t border-cyan-500/30 rounded-t-[32px] p-6 shadow-2xl max-h-[88vh] flex flex-col text-slate-100"
           >
             {/* iOS Drag Handle */}
             <div className="w-12 h-1.5 rounded-full bg-slate-600 mx-auto mb-3 shrink-0" />
@@ -763,13 +768,22 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
                         key={app.id}
                         className="p-2.5 rounded-xl bg-black/30 border border-white/5 flex items-center justify-between text-xs hover:border-cyan-500/30 transition-colors"
                       >
-                        <div className="truncate mr-2">
-                          <span className="font-semibold text-white block truncate">
-                            {app.name}
-                          </span>
-                          <span className="text-[9px] font-mono text-slate-500 uppercase">
-                            {app.category}
-                          </span>
+                        <div className="flex items-center space-x-2 mr-2 min-w-0">
+                          {app.icon && app.icon.startsWith('data:') && (
+                            <img
+                              src={app.icon}
+                              alt=""
+                              className="w-8 h-8 rounded-lg shrink-0"
+                            />
+                          )}
+                          <div className="truncate">
+                            <span className="font-semibold text-white block truncate">
+                              {app.name}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-500 uppercase">
+                              {app.category}
+                            </span>
+                          </div>
                         </div>
                         <button
                           onClick={() => handleTestLaunchApp(app)}

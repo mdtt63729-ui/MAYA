@@ -36,15 +36,517 @@ jobs:
       - name: Setup Android Project & Sync Capacitor
         run: |
           npx cap add android || true
-          # MIC PERMISSION FIX: the generated Capacitor AndroidManifest.xml does
-          # NOT include RECORD_AUDIO by default — without it getUserMedia()
-          # always fails with "Permission denied". Inject it before syncing.
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
-            sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <application|' "$MANIFEST"
-            echo "Injected RECORD_AUDIO permission into AndroidManifest.xml"
-            grep -n "uses-permission" "$MANIFEST" || true
-          fi
+
+          # ---------------------------------------------------------------
+          # NATIVE LAYER: Capacitor plugin (app scanning, launching, URLs,
+          # background voice service) + manifest permissions.
+          # ---------------------------------------------------------------
+          JAVA_DIR="android/app/src/main/java/com/mj/assistant"
+          mkdir -p "$JAVA_DIR"
+
+          cat > "$JAVA_DIR/MJNativePlugin.java" << 'JAVAEOF'
+          package com.mj.assistant;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Bitmap;
+          import android.graphics.Canvas;
+          import android.graphics.drawable.Drawable;
+          import android.hardware.camera2.CameraCharacteristics;
+          import android.hardware.camera2.CameraManager;
+          import android.media.AudioManager;
+          import android.net.Uri;
+          import android.os.BatteryManager;
+          import android.os.Build;
+          import android.provider.AlarmClock;
+          import android.provider.Settings;
+          import android.util.Base64;
+          import com.getcapacitor.JSArray;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import java.io.ByteArrayOutputStream;
+          import java.util.List;
+
+          @CapacitorPlugin(name = "MJNative")
+          public class MJNativePlugin extends Plugin {
+
+              @PluginMethod
+              public void getInstalledApps(PluginCall call) {
+                  JSArray apps = new JSArray();
+                  try {
+                      PackageManager pm = getContext().getPackageManager();
+                      Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
+                      mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+                      List<ResolveInfo> activities = pm.queryIntentActivities(mainIntent, 0);
+                      for (ResolveInfo ri : activities) {
+                          try {
+                              JSObject app = new JSObject();
+                              app.put("id", ri.activityInfo.packageName);
+                              app.put("name", ri.loadLabel(pm).toString());
+                              app.put("packageName", ri.activityInfo.packageName);
+                              Drawable icon = ri.activityInfo.loadIcon(pm);
+                              if (icon != null) {
+                                  int size = Math.min(96, Math.max(48, icon.getIntrinsicWidth()));
+                                  Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                                  Canvas canvas = new Canvas(bmp);
+                                  icon.setBounds(0, 0, size, size);
+                                  icon.draw(canvas);
+                                  ByteArrayOutputStream out = new ByteArrayOutputStream();
+                                  bmp.compress(Bitmap.CompressFormat.PNG, 80, out);
+                                  app.put("icon", "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP));
+                              }
+                              apps.put(app);
+                          } catch (Exception ignored) {
+                          }
+                      }
+                  } catch (Exception e) {
+                      call.reject("Failed to scan apps: " + e.getMessage());
+                      return;
+                  }
+                  JSObject ret = new JSObject();
+                  ret.put("apps", apps);
+                  call.resolve(ret);
+              }
+
+              @PluginMethod
+              public void launchApp(PluginCall call) {
+                  String pkg = call.getString("packageName");
+                  if (pkg == null || pkg.isEmpty()) {
+                      call.reject("packageName required");
+                      return;
+                  }
+                  try {
+                      Intent intent = getContext().getPackageManager().getLaunchIntentForPackage(pkg);
+                      if (intent == null) {
+                          call.reject("App not found: " + pkg);
+                          return;
+                      }
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      getContext().startActivity(intent);
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void openUrl(PluginCall call) {
+                  String url = call.getString("url");
+                  if (url == null || url.isEmpty()) {
+                      call.reject("url required");
+                      return;
+                  }
+                  try {
+                      Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      getContext().startActivity(intent);
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void startVoiceService(PluginCall call) {
+                  try {
+                      Intent intent = new Intent(getContext(), MJVoiceService.class);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          getContext().startForegroundService(intent);
+                      } else {
+                          getContext().startService(intent);
+                      }
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void stopVoiceService(PluginCall call) {
+                  try {
+                      getContext().stopService(new Intent(getContext(), MJVoiceService.class));
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              // ---------------- FAST LOCAL PATH (Ultra-Fast Response PRD) ----------------
+              // Real device controls executed locally with zero cloud round-trip.
+
+              @PluginMethod
+              public void setTorch(PluginCall call) {
+                  Boolean on = call.getBoolean("on");
+                  if (on == null) { call.reject("on required"); return; }
+                  try {
+                      CameraManager cm = (CameraManager) getContext().getSystemService(Context.CAMERA_SERVICE);
+                      String torchCamera = null;
+                      for (String id : cm.getCameraIdList()) {
+                          Boolean hasFlash = cm.getCameraCharacteristics(id).get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                          if (Boolean.TRUE.equals(hasFlash)) { torchCamera = id; break; }
+                      }
+                      if (torchCamera == null) { call.reject("No flash unit available on this device"); return; }
+                      cm.setTorchMode(torchCamera, on);
+                      JSObject ret = new JSObject();
+                      ret.put("on", on);
+                      call.resolve(ret);
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void adjustVolume(PluginCall call) {
+                  String direction = call.getString("direction");
+                  if (direction == null) { call.reject("direction required"); return; }
+                  try {
+                      AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+                      if ("up".equals(direction)) {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI);
+                      } else if ("down".equals(direction)) {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+                      } else if ("mute".equals(direction)) {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI);
+                      } else if ("unmute".equals(direction)) {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, AudioManager.FLAG_SHOW_UI);
+                      } else {
+                          call.reject("direction must be up|down|mute|unmute");
+                          return;
+                      }
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void openSystemSetting(PluginCall call) {
+                  String key = call.getString("setting");
+                  Intent intent;
+                  if ("wifi".equals(key)) intent = new Intent(Settings.ACTION_WIFI_SETTINGS);
+                  else if ("bluetooth".equals(key)) intent = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
+                  else if ("airplane".equals(key)) intent = new Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS);
+                  else if ("display".equals(key)) intent = new Intent(Settings.ACTION_DISPLAY_SETTINGS);
+                  else if ("sound".equals(key)) intent = new Intent(Settings.ACTION_SOUND_SETTINGS);
+                  else if ("location".equals(key)) intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                  else if ("appsettings".equals(key)) intent = new Intent(Settings.ACTION_APPLICATION_SETTINGS);
+                  else intent = new Intent(Settings.ACTION_SETTINGS);
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  try {
+                      getContext().startActivity(intent);
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void startTimer(PluginCall call) {
+                  Integer seconds = call.getInt("seconds");
+                  String label = call.getString("label");
+                  if (seconds == null || seconds <= 0) { call.reject("seconds required"); return; }
+                  try {
+                      Intent i = new Intent(AlarmClock.ACTION_SET_TIMER)
+                              .putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+                              .putExtra(AlarmClock.EXTRA_MESSAGE, label != null ? label : "MJ Timer")
+                              .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      getContext().startActivity(i);
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void globalAction(PluginCall call) {
+                  String action = call.getString("action");
+                  if (action == null) { call.reject("action required (back|home|recents|notifications)"); return; }
+                  boolean ok = MJAccessibilityService.performAction(action);
+                  if (ok) {
+                      call.resolve();
+                  } else {
+                      call.reject("Accessibility service is not enabled. Enable it in Android Settings.");
+                  }
+              }
+
+              @PluginMethod
+              public void isAccessibilityEnabled(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  ret.put("enabled", MJAccessibilityService.isServiceEnabled(getContext()));
+                  call.resolve(ret);
+              }
+
+              @PluginMethod
+              public void openAccessibilitySettings(PluginCall call) {
+                  try {
+                      MJAccessibilityService.openSettings(getContext());
+                      call.resolve();
+                  } catch (Exception e) {
+                      call.reject(e.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void getDeviceStatus(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  try {
+                      BatteryManager bm = (BatteryManager) getContext().getSystemService(Context.BATTERY_SERVICE);
+                      int level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                      boolean charging = bm.isCharging();
+                      ret.put("batteryLevel", level);
+                      ret.put("charging", charging);
+                  } catch (Exception e) {
+                      ret.put("batteryLevel", -1);
+                      ret.put("charging", false);
+                  }
+                  call.resolve(ret);
+              }
+
+              @PluginMethod
+              public void getForegroundApp(PluginCall call) {
+                  JSObject ret = new JSObject();
+                  ret.put("packageName", MJAccessibilityService.getForegroundPackage());
+                  ret.put("accessibilityEnabled", MJAccessibilityService.isServiceEnabled(getContext()));
+                  call.resolve(ret);
+              }
+          }
+          JAVAEOF
+
+          cat > "$JAVA_DIR/MJAccessibilityService.java" << 'JAVAEOF'
+          package com.mj.assistant;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.provider.Settings;
+          import android.view.accessibility.AccessibilityEvent;
+
+          /**
+           * MJ Accessibility Service — foundation of the Android Agent.
+           * Provides system navigation (Back/Home/Recents) and foreground-app
+           * tracking (launch verification). MUST be enabled by the user from
+           * Android Settings; MJ never enables or bypasses it silently.
+           */
+          public class MJAccessibilityService extends AccessibilityService {
+              private static volatile MJAccessibilityService instance;
+              private static volatile String foregroundPackage = "";
+
+              @Override
+              protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  instance = this;
+              }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      CharSequence pkg = event.getPackageName();
+                      if (pkg != null) {
+                          foregroundPackage = pkg.toString();
+                      }
+                  }
+              }
+
+              @Override
+              public void onInterrupt() {
+                  // No-op
+              }
+
+              @Override
+              public void onDestroy() {
+                  instance = null;
+                  super.onDestroy();
+              }
+
+              /** Returns true if the requested global action was performed. */
+              public static boolean performAction(String action) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return false;
+                  int id;
+                  if ("home".equals(action)) {
+                      id = GLOBAL_ACTION_HOME;
+                  } else if ("recents".equals(action)) {
+                      id = GLOBAL_ACTION_RECENTS;
+                  } else if ("notifications".equals(action)) {
+                      id = GLOBAL_ACTION_NOTIFICATIONS;
+                  } else {
+                      id = GLOBAL_ACTION_BACK;
+                  }
+                  return svc.performGlobalAction(id);
+              }
+
+              /** Currently focused app package ("" when the service is off). */
+              public static String getForegroundPackage() {
+                  return foregroundPackage == null ? "" : foregroundPackage;
+              }
+
+              /** Whether the user has enabled this service in Android Settings. */
+              public static boolean isServiceEnabled(Context ctx) {
+                  try {
+                      String setting = Settings.Secure.getString(
+                              ctx.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                      return setting != null && setting.contains(ctx.getPackageName() + "/.MJAccessibilityService");
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              /** Opens the Android Accessibility settings screen. */
+              public static void openSettings(Context ctx) {
+                  Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  ctx.startActivity(intent);
+              }
+          }
+          JAVAEOF
+
+          cat > "$JAVA_DIR/MJVoiceService.java" << 'JAVAEOF'
+          package com.mj.assistant;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.os.IBinder;
+
+          /**
+           * Foreground service that keeps the app process alive while the
+           * voice session is active, so mic capture & playback continue when
+           * the app is minimized.
+           */
+          public class MJVoiceService extends Service {
+              private static final String CHANNEL_ID = "mj_voice_channel";
+              private static final int NOTIFICATION_ID = 1101;
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel(
+                              CHANNEL_ID, "MJ Voice Session", NotificationManager.IMPORTANCE_LOW);
+                      channel.setDescription("Keeps the MJ voice session alive in the background");
+                      NotificationManager nm = getSystemService(NotificationManager.class);
+                      if (nm != null) nm.createNotificationChannel(channel);
+                  }
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  PendingIntent contentIntent = null;
+                  Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+                  if (launch != null) {
+                      contentIntent = PendingIntent.getActivity(this, 0, launch,
+                              PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  }
+                  Notification.Builder builder;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      builder = new Notification.Builder(this, CHANNEL_ID);
+                  } else {
+                      builder = new Notification.Builder(this);
+                  }
+                  Notification notification = builder
+                          .setContentTitle("MJ AI Assistant")
+                          .setContentText("Voice session running in background")
+                          .setSmallIcon(android.R.drawable.sym_def_app_icon)
+                          .setOngoing(true)
+                          .setContentIntent(contentIntent)
+                          .build();
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                  } else {
+                      startForeground(NOTIFICATION_ID, notification);
+                  }
+                  return START_STICKY;
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+          }
+          JAVAEOF
+
+          cat > "$JAVA_DIR/MainActivity.java" << 'JAVAEOF'
+          package com.mj.assistant;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  registerPlugin(MJNativePlugin.class);
+              }
+          }
+          JAVAEOF
+
+          # Accessibility service config
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/mj_accessibility_config.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100" />
+          XMLEOF
+
+          # Patch AndroidManifest.xml: permissions + queries + service declarations
+          python3 - << 'PYEOF'
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p).read()
+          if "android.permission.RECORD_AUDIO" not in s:
+              perms = (
+                  '<uses-permission android:name="android.permission.RECORD_AUDIO" />\n'
+                  '    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n'
+                  '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+                  '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />\n'
+                  '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
+                  '    '
+              )
+              s = s.replace("<application", perms + "<application", 1)
+          if "<queries>" not in s:
+              queries = (
+                  '<queries>\n'
+                  '        <intent>\n'
+                  '            <action android:name="android.intent.action.MAIN" />\n'
+                  '            <category android:name="android.intent.category.LAUNCHER" />\n'
+                  '        </intent>\n'
+                  '    </queries>\n'
+                  '    '
+              )
+              s = s.replace("<application", queries + "<application", 1)
+          if "MJVoiceService" not in s:
+              service = '<service android:name=".MJVoiceService" android:exported="false" android:foregroundServiceType="microphone" />\n        '
+              s = s.replace("</application>", service + "</application>", 1)
+          if "MJAccessibilityService" not in s:
+              acc_service = (
+                  '<service android:name=".MJAccessibilityService" android:exported="false" '
+                  'android:label="MJ Android Agent" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">\n'
+                  '            <intent-filter>\n'
+                  '                <action android:name="android.accessibilityservice.AccessibilityService" />\n'
+                  '            </intent-filter>\n'
+                  '            <meta-data android:name="android.accessibility" android:resource="@xml/mj_accessibility_config" />\n'
+                  '        </service>\n        '
+              )
+              s = s.replace("</application>", acc_service + "</application>", 1)
+              print("MJAccessibilityService declared in manifest")
+          open(p, "w").write(s)
+          print("AndroidManifest.xml patched")
+          PYEOF
+
           npx cap sync android
 
       - name: Build Unsigned Release APK with Gradle
