@@ -21,6 +21,7 @@ import {
 import { appScanner, AppDefinition } from '../../services/appScanner';
 import { audioStreamer } from '../../services/audioStreamer';
 import { wakeWordDetector } from '../../services/wakeWordDetector';
+import { Capacitor } from '@capacitor/core';
 
 interface IosSettingsModalProps {
   isOpen: boolean;
@@ -83,6 +84,47 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
     setKeySavedMsg('');
 
     try {
+      // STANDALONE APK MODE: there is no backend server here — verify the
+      // API key directly against Google's Gemini API instead (the old
+      // server-only test returned HTML and failed with a JSON parse error).
+      if (Capacitor.isNativePlatform()) {
+        const key = apiKey.trim();
+        if (!key) {
+          setApiTestResult({
+            success: false,
+            error: 'Standalone app mode — your personal Gemini API Key is required. Paste it above and tap Save.',
+          });
+          return;
+        }
+
+        const started = Date.now();
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=1`
+        );
+        const data = await res.json().catch(() => null);
+
+        if (res.ok) {
+          localStorage.setItem('gemini_custom_api_key', key);
+          setKeySavedMsg('API key verified & saved! Direct Gemini connection ready.');
+          setApiTestResult({
+            success: true,
+            latencyMs: Date.now() - started,
+            audioInputCodec: 'audio/pcm;rate=16000',
+            audioOutputCodec: 'audio/pcm;rate=24000',
+            primaryModel: 'gemini-3.1-flash-live-preview',
+          });
+        } else {
+          setApiTestResult({
+            success: false,
+            error:
+              data?.error?.message ||
+              `Gemini API rejected this key (HTTP ${res.status}). Double-check the key and try again.`,
+          });
+        }
+        return;
+      }
+
+      // WEB MODE: relay through the backend server
       const res = await fetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -358,7 +400,9 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
                       <span>Gemini API Key Configuration</span>
                     </div>
                     <p className="text-[11px] text-slate-300 leading-relaxed">
-                      Leave empty to use the pre-configured server environment key, or enter your personal Gemini API Key for independent quota.
+                      {Capacitor.isNativePlatform()
+                        ? 'Standalone app mode — your personal Gemini API Key is REQUIRED here (the app connects directly to Gemini, no server). Get a free key at aistudio.google.com/apikey, paste it, and tap Save.'
+                        : 'Leave empty to use the pre-configured server environment key, or enter your personal Gemini API Key for independent quota.'}
                     </p>
                   </div>
 

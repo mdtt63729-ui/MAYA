@@ -36,6 +36,15 @@ jobs:
       - name: Setup Android Project & Sync Capacitor
         run: |
           npx cap add android || true
+          # MIC PERMISSION FIX: the generated Capacitor AndroidManifest.xml does
+          # NOT include RECORD_AUDIO by default — without it getUserMedia()
+          # always fails with "Permission denied". Inject it before syncing.
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <application|' "$MANIFEST"
+            echo "Injected RECORD_AUDIO permission into AndroidManifest.xml"
+            grep -n "uses-permission" "$MANIFEST" || true
+          fi
           npx cap sync android
 
       - name: Build Unsigned Release APK with Gradle

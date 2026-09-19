@@ -14,6 +14,7 @@ import {
   Activity,
   Radio,
 } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 
 interface OnboardingModalProps {
   isOpen: boolean;
@@ -62,6 +63,56 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     const key = keyToTest !== undefined ? keyToTest : (useServerKey ? '' : apiKey);
 
     try {
+      // STANDALONE APK MODE: no backend server exists — verify the key
+      // directly against the Gemini API instead of the server relay.
+      if (Capacitor.isNativePlatform()) {
+        const trimmedKey = (key || '').trim();
+        if (!trimmedKey) {
+          setTestResult({
+            success: false,
+            status: 'failed',
+            latencyMs: 0,
+            primaryModel: 'gemini-3.1-flash-live',
+            audioInputCodec: 'audio/pcm;rate=16000',
+            audioOutputCodec: 'audio/pcm;rate=24000',
+            streamingProtocol: 'Direct WebSocket Real-Time Stream',
+            error: 'Standalone app mode — your personal Gemini API Key is required here.',
+          });
+          return;
+        }
+
+        const started = Date.now();
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(trimmedKey)}&pageSize=1`
+        );
+        const data = await res.json().catch(() => null);
+
+        if (res.ok) {
+          localStorage.setItem('gemini_custom_api_key', trimmedKey);
+          setTestResult({
+            success: true,
+            status: 'connected',
+            latencyMs: Date.now() - started,
+            primaryModel: 'gemini-3.1-flash-live',
+            audioInputCodec: 'audio/pcm;rate=16000',
+            audioOutputCodec: 'audio/pcm;rate=24000',
+            streamingProtocol: 'Direct WebSocket Real-Time Stream',
+          });
+        } else {
+          setTestResult({
+            success: false,
+            status: 'failed',
+            latencyMs: Date.now() - started,
+            primaryModel: 'gemini-3.1-flash-live',
+            audioInputCodec: 'audio/pcm;rate=16000',
+            audioOutputCodec: 'audio/pcm;rate=24000',
+            streamingProtocol: 'Direct WebSocket Real-Time Stream',
+            error: data?.error?.message || `Gemini API rejected this key (HTTP ${res.status}).`,
+          });
+        }
+        return;
+      }
+
       const res = await fetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
