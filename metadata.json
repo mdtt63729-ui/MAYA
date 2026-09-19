@@ -1,0 +1,12 @@
+{
+  "name": "MJ AI Assistant",
+  "description": "Real-time voice-to-voice AI assistant web app with Gemini Live API, witty, confident, and sassy persona, raw PCM16/24kHz streaming, and browser action function calling.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
