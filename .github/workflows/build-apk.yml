@@ -1349,6 +1349,10 @@ jobs:
                   super.onCreate(savedInstanceState);
                   registerPlugin(MJNativePlugin.class);
 
+                  // SCREEN FIX: keep the display awake while MJ is open, so the
+                  // screen no longer turns off / dims during a voice session.
+                  getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
                   // Floating orb + edge lighting gate: edge lighting shows only
                   // while MJ is MINIMIZED. BridgeActivity marks onResume/onPause
                   // as final, so observe the AndroidX lifecycle instead.

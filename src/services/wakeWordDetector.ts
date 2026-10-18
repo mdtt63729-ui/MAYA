@@ -47,7 +47,11 @@ export class WakeWordDetector {
 
   constructor() {
     const saved = localStorage.getItem('wake_word_enabled');
-    this.isEnabled = saved !== null ? saved === 'true' : true;
+    // MIC FIX: wake-word listening is now OFF by default. The mic must only
+    // turn on when the user taps the orb to activate MJ — not auto-start in
+    // the background (which caused the mic to flip on/off repeatedly).
+    // Users who want hands-free "Hey MJ" can still switch it on in Settings.
+    this.isEnabled = saved !== null ? saved === 'true' : false;
   }
 
   public init(callback: WakeWordCallback): boolean {
@@ -99,6 +103,8 @@ export class WakeWordDetector {
         }
       };
 
+      // MIC FIX: do NOT auto-start listening here. Only start when the user
+      // explicitly enables wake word (or taps the orb to start a session).
       if (this.isEnabled) {
         this.start();
       }

@@ -49,7 +49,8 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   const [selectedPersona, setSelectedPersona] = useState<string>('sweet_female');
 
   // Wake Word State
-  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(true);
+  // MIC FIX: default OFF so the mic never auto-starts in the background.
+  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
 
   // App Scanner State
   const [appSearch, setAppSearch] = useState<string>('');
