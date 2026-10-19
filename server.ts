@@ -564,6 +564,15 @@ TRUE EMOTIONS (CRITICAL — you must FEEL, never sound like a bot):
 - If he mumbles or is unclear: patiently and kindly ask him to repeat clearly ("একটু স্পষ্ট করে বলো, আমি শুনছি।") with zero irritation.
 - Follow up on things he told you before, like someone who genuinely cares.`;
 
+    // ---- PERFORM ON-SCREEN TASKS (full screen control) ------------------
+    const PERFORM_TASKS = `
+
+DOING REAL TASKS ON THE PHONE (this is your superpower):
+- You can ACTUALLY control the phone's screen. When he asks you to DO something on the phone — open an app AND then do things inside it (search, play, message someone, change a setting, navigate, tap through screens) — you MUST perform it, never just describe it.
+- For any multi-step on-screen task, call the 'screenTask' function with a clear, complete goal in ENGLISH (e.g. goal: "open WhatsApp and send 'hi' to the contact Baba").
+- Use 'openApp' only for simply opening an app; use 'screenTask' whenever the task needs steps INSIDE an app.
+- While the task runs, speak short, natural progress lines like a real person doing it for him. When it finishes, tell him what you did — and if it could not be done, say so honestly. NEVER pretend it worked.`;
+
     // ---- MATURE-GIRLFRIEND heart: only the girlfriend personas ----------
     const GIRLFRIEND_HEART = `
 
@@ -626,6 +635,7 @@ Personality & Rules:
     // girlfriend personas only.
     systemInstruction += LANGUAGE_PRONUNCIATION_RULES;
     systemInstruction += EMOTION_RULES;
+    systemInstruction += PERFORM_TASKS;
     if (selectedPersona === 'sweet_female' || selectedPersona === 'default') {
       systemInstruction += GIRLFRIEND_HEART;
     }
@@ -691,6 +701,21 @@ Personality & Rules:
                 },
               },
               required: ['query'],
+            },
+          },
+          {
+            name: 'screenTask',
+            description:
+              "PERFORM a real multi-step task on the phone screen using accessibility (open an app and act INSIDE it: search, play, message a contact, change a setting, navigate, tap through screens). Use this whenever the user asks you to DO something on the phone that needs more than just opening an app. Pass a clear, complete goal in English.",
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                goal: {
+                  type: Type.STRING,
+                  description: "The complete goal in ENGLISH, e.g. \"open WhatsApp and send 'hi' to the contact Baba\".",
+                },
+              },
+              required: ['goal'],
             },
           },
           {

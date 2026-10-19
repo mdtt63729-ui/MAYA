@@ -494,6 +494,24 @@ jobs:
                                   call.resolve(ret);
                                   return;
                               }
+                              if ("tap".equals(action)) {
+                                  Integer xi = call.getInt("x");
+                                  Integer yi = call.getInt("y");
+                                  boolean ok = MJAccessibilityService.gestureTap(xi == null ? 0 : xi, yi == null ? 0 : yi);
+                                  JSObject ret = new JSObject();
+                                  ret.put("found", ok);
+                                  ret.put("success", ok);
+                                  call.resolve(ret);
+                                  return;
+                              }
+                              if ("swipe".equals(action)) {
+                                  boolean ok = MJAccessibilityService.gestureSwipeDir(value == null ? "down" : value);
+                                  JSObject ret = new JSObject();
+                                  ret.put("found", ok);
+                                  ret.put("success", ok);
+                                  call.resolve(ret);
+                                  return;
+                              }
                               android.view.accessibility.AccessibilityNodeInfo node = null;
                               while (System.currentTimeMillis() < deadline) {
                                   node = MJAccessibilityService.findNodeByQuery(matchText, matchDesc, editable, clickable, excludeEditable);
@@ -1007,6 +1025,31 @@ jobs:
                       android.graphics.Path p = new android.graphics.Path();
                       if (scrollDown) { p.moveTo(w / 2, (int) (h * 0.70f)); p.lineTo(w / 2, (int) (h * 0.35f)); }
                       else { p.moveTo(w / 2, (int) (h * 0.35f)); p.lineTo(w / 2, (int) (h * 0.70f)); }
+                      android.accessibilityservice.GestureDescription.Builder b = new android.accessibilityservice.GestureDescription.Builder();
+                      b.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(p, 0, 300));
+                      return svc.dispatchGesture(b.build(), null, null);
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              /** Directional swipe: up / down / left / right. */
+              public static boolean gestureSwipeDir(String dir) {
+                  MJAccessibilityService svc = instance;
+                  if (svc == null) return false;
+                  try {
+                      android.util.DisplayMetrics dm = svc.getResources().getDisplayMetrics();
+                      int w = dm.widthPixels, h = dm.heightPixels;
+                      android.graphics.Path p = new android.graphics.Path();
+                      if ("left".equals(dir)) {
+                          p.moveTo((int) (w * 0.80f), h / 2); p.lineTo((int) (w * 0.20f), h / 2);
+                      } else if ("right".equals(dir)) {
+                          p.moveTo((int) (w * 0.20f), h / 2); p.lineTo((int) (w * 0.80f), h / 2);
+                      } else if ("up".equals(dir)) {
+                          p.moveTo(w / 2, (int) (h * 0.35f)); p.lineTo(w / 2, (int) (h * 0.70f));
+                      } else {
+                          p.moveTo(w / 2, (int) (h * 0.70f)); p.lineTo(w / 2, (int) (h * 0.35f));
+                      }
                       android.accessibilityservice.GestureDescription.Builder b = new android.accessibilityservice.GestureDescription.Builder();
                       b.addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(p, 0, 300));
                       return svc.dispatchGesture(b.build(), null, null);

@@ -12,6 +12,7 @@ import { audioStreamer } from './audioStreamer';
 import { appScanner, AppDefinition } from './appScanner';
 import { localCommandEngine } from './localCommandEngine';
 import { androidAgent } from './androidAgent';
+import { screenAgent } from './screenAgent';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { Capacitor } from '@capacitor/core';
 
@@ -93,10 +94,21 @@ MATURE GIRLFRIEND HEART (this is your soul):
 - Love shows through presence and feeling — not by repeating his pet name in every line.`;
 
 // Append the shared rules to EVERY persona (spoken-language + true emotions),
+// ---- PERFORM ON-SCREEN TASKS (full screen control) ----------------------
+// MJ must actually DO multi-step tasks on the phone, not just talk about them.
+const PERFORM_TASKS = `
+
+DOING REAL TASKS ON THE PHONE (this is your superpower):
+- You can ACTUALLY control the phone's screen. When he asks you to DO something on the phone — open an app AND then do things inside it (search, play, message someone, change a setting, navigate, tap through screens) — you MUST perform it, never just describe it.
+- For any multi-step on-screen task, call the 'screenTask' function with a clear, complete goal in ENGLISH (e.g. goal: "open WhatsApp and send 'hi' to the contact Baba", goal: "open YouTube and play Arijit Singh songs", goal: "open Settings and turn on Bluetooth").
+- Use 'openApp' only for simply opening an app; use 'screenTask' whenever the task needs steps INSIDE an app.
+- While the task runs, speak short, natural progress lines like a real person doing it for him ("একটু দাঁড়াও জান, WhatsApp খুলছি..."). When it finishes, tell him what you did — and if it could not be done, say so honestly. NEVER pretend it worked.`;
+
 // and the mature-girlfriend heart to the girlfriend personas only.
 for (const key of Object.keys(DIRECT_PERSONAS)) {
   DIRECT_PERSONAS[key] += LANGUAGE_PRONUNCIATION_RULES;
   DIRECT_PERSONAS[key] += EMOTION_RULES;
+  DIRECT_PERSONAS[key] += PERFORM_TASKS;
   if (key === 'sweet_female' || key === 'default') {
     DIRECT_PERSONAS[key] += GIRLFRIEND_HEART;
   }
@@ -144,6 +156,21 @@ const DIRECT_TOOLS: any = [
             query: { type: Type.STRING, description: 'The search query string.' },
           },
           required: ['query'],
+        },
+      },
+      {
+        name: 'screenTask',
+        description:
+          "PERFORM a real multi-step task on the phone screen using accessibility (open an app and act INSIDE it: search, play, message a contact, change a setting, navigate, tap through screens). Use this whenever the user asks you to DO something on the phone that needs more than just opening an app. Pass a clear, complete goal in English.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            goal: {
+              type: Type.STRING,
+              description: "The complete goal in ENGLISH, e.g. \"open WhatsApp and send 'hi' to the contact Baba\" or \"open YouTube and play Arijit Singh songs\".",
+            },
+          },
+          required: ['goal'],
         },
       },
     ],
@@ -393,6 +420,11 @@ export class LiveSession {
 
     // Android Agent progress → UI subtitles (through the local-command pipe)
     androidAgent.setReportListener((msg) => {
+      this.callbacks.onLocalCommand?.({ isLocalCommand: true, actionTaken: 'agent_update', feedbackText: msg });
+    });
+
+    // Screen Agent progress → UI subtitles
+    screenAgent.setReportListener((msg) => {
       this.callbacks.onLocalCommand?.({ isLocalCommand: true, actionTaken: 'agent_update', feedbackText: msg });
     });
 
@@ -918,7 +950,7 @@ export class LiveSession {
     this.callbacks.onToolCall?.(toolCall);
 
     // SEARCHING state: show the emerald radar while executing an action
-    if (name === 'openApp' || name === 'openWebsite' || name === 'searchWeb') {
+    if (name === 'openApp' || name === 'openWebsite' || name === 'searchWeb' || name === 'screenTask') {
       this.setState('searching');
       if (this.searchingResetTimer) clearTimeout(this.searchingResetTimer);
       this.searchingResetTimer = setTimeout(() => {
@@ -981,6 +1013,15 @@ export class LiveSession {
           success: true,
         });
         resultText = `Searched the web for "${query}".`;
+      }
+    } else if (name === 'screenTask') {
+      const goal = (args.goal as string) || '';
+      if (goal) {
+        this.setState('searching');
+        const r = await screenAgent.runTask(goal);
+        resultText = r.success
+          ? `Task completed: ${r.message}`
+          : `Task could NOT be completed: ${r.message}. Tell the user honestly what happened.`;
       }
     }
 
