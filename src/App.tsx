@@ -27,6 +27,17 @@ import { OnboardingModal } from './components/onboarding/OnboardingModal';
 import { ActionConfirmationModal } from './components/modals/ActionConfirmationModal';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
+// Wake phrases → persona. Used by the NATIVE fallback listener (when the
+// WebView has no web SpeechRecognition) so "Hey MJ" / "Hey Jarvis" /
+// "Activate Friday" work hands-free on the APK too.
+const NATIVE_WAKE_MAP: Array<{ persona: string; words: string[] }> = [
+  { persona: 'sassy', words: ['sassy', 'সেসি', 'স্যাসি'] },
+  { persona: 'flirty', words: ['flirty', 'ফ্লার্টি'] },
+  { persona: 'jarvis', words: ['jarvis', 'জার্ভিস', 'জারভিস'] },
+  { persona: 'friday', words: ['friday', 'ফ্রাইডে'] },
+  { persona: 'sweet_female', words: ['mj', 'এমজে'] },
+];
+
 export default function App() {
   const [sessionState, setSessionState] = useState<LiveSessionState>('disconnected');
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -90,15 +101,66 @@ export default function App() {
   // While a live session is active the detector pauses (the session mic owns
   // the input), and it resumes automatically when the session ends.
   const toggleSessionRef = useRef<() => void>(() => {});
+  const nativeWakeListenerRef = useRef<any>(null);
+  const useNativeWakeRef = useRef<boolean>(false);
+
+  // Central wake handler: switch to the requested persona, then start the session.
+  const handleWake = useCallback((persona?: string) => {
+    if (liveSession.getState() !== 'disconnected') return;
+    if (persona) localStorage.setItem('gemini_selected_persona', persona);
+    toggleSessionRef.current();
+  }, []);
+
+  // NATIVE wake listener (APK): uses the on-device SpeechRecognizer via the
+  // MJNative plugin when the WebView has no web SpeechRecognition. Only runs
+  // while disconnected — it is stopped the moment a live session starts so it
+  // never fights the session's microphone.
+  const startNativeWake = useCallback(() => {
+    if (!useNativeWakeRef.current || !Capacitor.isNativePlatform()) return;
+    const MJNative = (Capacitor as any).Plugins?.MJNative;
+    if (!MJNative?.startOfflineListening || nativeWakeListenerRef.current) return;
+    const lang = localStorage.getItem('mj_offline_stt_lang') || 'en-IN';
+    try {
+      MJNative.addListener?.('offlineTranscript', (data: any) => {
+        if (liveSession.getState() !== 'disconnected') return;
+        const t = (data?.text || '').toString().toLowerCase();
+        for (const g of NATIVE_WAKE_MAP) {
+          if (g.words.some((w) => t.includes(w))) {
+            handleWake(g.persona);
+            return;
+          }
+        }
+      })?.then?.((l: any) => {
+        nativeWakeListenerRef.current = l;
+      });
+      MJNative.startOfflineListening({ language: lang })?.catch?.(() => {});
+    } catch {
+      /* native wake is best-effort */
+    }
+  }, [handleWake]);
+
+  const stopNativeWake = useCallback(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    const MJNative = (Capacitor as any).Plugins?.MJNative;
+    try {
+      MJNative?.stopOfflineListening?.()?.catch?.(() => {});
+      nativeWakeListenerRef.current?.remove?.();
+    } catch {
+      /* ignore */
+    }
+    nativeWakeListenerRef.current = null;
+  }, []);
 
   useEffect(() => {
-    wakeWordDetector.init(() => {
-      if (liveSession.getState() === 'disconnected') {
-        toggleSessionRef.current();
-      }
-    });
-    return () => wakeWordDetector.stop();
-  }, []);
+    const webOk = wakeWordDetector.init((_keyword, persona) => handleWake(persona));
+    // No web speech API in this runtime → fall back to the native listener.
+    useNativeWakeRef.current = !webOk;
+    if (!webOk) startNativeWake();
+    return () => {
+      wakeWordDetector.stop();
+      stopNativeWake();
+    };
+  }, [handleWake, startNativeWake, stopNativeWake]);
 
   // Scan and index apps on initial boot
   useEffect(() => {
@@ -152,11 +214,14 @@ export default function App() {
       await liveSession.connect({
         onStateChange: (newState) => {
           setSessionState(newState);
-          // Wake word sleeps during a live session and wakes on standby
+          // Wake word sleeps during a live session and wakes on standby.
+          // The native listener is stopped too so it never fights the session mic.
           if (newState === 'disconnected') {
             wakeWordDetector.resume();
+            startNativeWake();
           } else {
             wakeWordDetector.pause();
+            stopNativeWake();
           }
         },
         onTranscript: handleTranscript,

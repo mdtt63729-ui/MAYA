@@ -319,6 +319,58 @@ export class AppScanner {
     return null;
   }
 
+  /**
+   * Well-known Android package names. Resolving these lets MJ launch the REAL
+   * installed app even before/without a full device scan — so "YouTube kholo"
+   * or "WhatsApp kholo" never falls back to opening a browser tab.
+   */
+  private static readonly KNOWN_PACKAGES: Record<string, string> = {
+    youtube: 'com.google.android.youtube',
+    whatsapp: 'com.whatsapp',
+    spotify: 'com.spotify.music',
+    telegram: 'org.telegram.messenger',
+    instagram: 'com.instagram.android',
+    twitter: 'com.twitter.android',
+    gmail: 'com.google.android.gm',
+    maps: 'com.google.android.apps.maps',
+    chrome: 'com.android.chrome',
+    gallery: 'com.google.android.apps.photos',
+    facebook: 'com.facebook.katana',
+    messenger: 'com.facebook.orca',
+    snapchat: 'com.snapchat.android',
+    gaana: 'com.gaana',
+    clock: 'com.google.android.deskclock',
+    calendar: 'com.google.android.calendar',
+    playstore: 'com.android.vending',
+    phone: 'com.google.android.dialer',
+    messages: 'com.google.android.apps.messaging',
+  };
+
+  /** Maps a website URL back to an installed app (so a web request can open
+   *  the real native app instead of a browser tab). */
+  public findAppByUrl(url: string): AppDefinition | null {
+    const u = (url || '').toLowerCase();
+    if (!u) return null;
+    const routes: Array<[RegExp, string]> = [
+      [/youtube\.com|youtu\.be/, 'youtube'],
+      [/whatsapp\.com|wa\.me/, 'whatsapp'],
+      [/spotify\.com/, 'spotify'],
+      [/instagram\.com/, 'instagram'],
+      [/t\.me|telegram/, 'telegram'],
+      [/x\.com|twitter\.com/, 'twitter'],
+      [/mail\.google\.com|gmail/, 'gmail'],
+      [/maps\.google\.com|google\.com\/maps/, 'maps'],
+      [/facebook\.com/, 'facebook'],
+    ];
+    for (const [re, id] of routes) {
+      if (re.test(u)) {
+        const app = this.installedApps.get(id);
+        if (app) return app;
+      }
+    }
+    return null;
+  }
+
   /** Bengali-spoken app names → canonical registry ids. */
   private static readonly BENGALI_ALIASES: Record<string, string> = {
     'ইউটিউব': 'youtube',
@@ -366,31 +418,44 @@ export class AppScanner {
       return { success: true, actionType: 'builtin', url: app.url };
     }
 
-    // NATIVE ANDROID: launch the actual installed app via MJNative
-    if (app.packageName) {
-      // Dedupe guard — if this app was launched moments ago (e.g. the local
-      // fast path already fired and the model then proposed the same tool
-      // call), don't launch it a second time.
-      if (
-        this.lastNativeLaunch &&
-        this.lastNativeLaunch.pkg === app.packageName &&
-        Date.now() - this.lastNativeLaunch.t < 4000
-      ) {
-        return { success: true, actionType: 'native_app_launch_dedupe', url: app.url };
-      }
-      try {
-        const MJNative = (Capacitor as any).Plugins?.MJNative;
-        if (Capacitor.isNativePlatform() && MJNative) {
-          MJNative.launchApp({ packageName: app.packageName });
-          this.lastNativeLaunch = { pkg: app.packageName, t: Date.now() };
-          return { success: true, actionType: 'native_app_launch', url: app.url };
+    // NATIVE ANDROID: launch the ACTUAL installed app via MJNative. Resolve the
+    // package from the device scan OR the known-package map, so an app request
+    // (YouTube, WhatsApp, Spotify…) never silently falls through to a browser.
+    const pkg = app.packageName || AppScanner.KNOWN_PACKAGES[app.id];
+    if (Capacitor.isNativePlatform()) {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      if (pkg && MJNative?.launchApp) {
+        // Dedupe guard — if this app was launched moments ago (e.g. the local
+        // fast path already fired and the model then proposed the same tool
+        // call), don't launch it a second time.
+        if (
+          this.lastNativeLaunch &&
+          this.lastNativeLaunch.pkg === pkg &&
+          Date.now() - this.lastNativeLaunch.t < 4000
+        ) {
+          return { success: true, actionType: 'native_app_launch_dedupe', url: app.url };
         }
-      } catch (err) {
-        console.warn('[AppScanner] Native launch failed:', err);
+        try {
+          const pr = MJNative.launchApp({ packageName: pkg });
+          // If the app isn't installed / launch rejects, fall back to the app's
+          // own URL scheme (which opens the real app when present).
+          if (pr && typeof pr.catch === 'function') {
+            pr.catch(() => this.openExternalUrl(app.intentUri || app.url));
+          }
+          this.lastNativeLaunch = { pkg, t: Date.now() };
+          return { success: true, actionType: 'native_app_launch', url: app.url };
+        } catch (err) {
+          console.warn('[AppScanner] Native launch failed:', err);
+        }
+      }
+      // No package known — prefer the app's own URL scheme over a browser.
+      if (app.intentUri && MJNative?.openUrl) {
+        this.openExternalUrl(app.intentUri);
+        return { success: true, actionType: 'native_intent', url: app.intentUri };
       }
     }
 
-    // Try opening external link
+    // Web (or last resort)
     this.openExternalUrl(app.url);
     return { success: true, actionType: 'window_open', url: app.url };
   }

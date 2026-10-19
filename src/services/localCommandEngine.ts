@@ -404,34 +404,65 @@ class LocalCommandEngine {
     // 10. CONSEQUENTIAL ACTIONS — WhatsApp draft & phone call
     //     (explicit confirmation required before execution)
     // ---------------------------------------------------------------
-    const msgMatch =
-      text.match(/(?:send|bhejo|message)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?(?:to\s+)?([a-z0-9]+)\s+(?:saying\s+|that\s+|bolke\s+)?(.*)/i) ||
-      text.match(/([a-z0-9]+)\s+(?:ko|ke)\s+(?:message|whatsapp)\s+(?:bhejo|karo)\s*(.*)/i);
-    if (msgMatch && msgMatch[1] && /(whatsapp|message|মেসেজ)/.test(text)) {
-      const recipient = msgMatch[1].trim();
-      const messageBody = msgMatch[2] ? msgMatch[2].trim() : 'I will be there shortly.';
-      const task: ActiveTask = {
-        id: `task_${Date.now()}`,
-        goal: `Send WhatsApp message to ${recipient}`,
-        status: 'waiting-confirmation',
-        currentStepIndex: 0,
-        confirmationPrompt: `${recipient}-কে WhatsApp-এ এই মেসেজটা পাঠাবো: "${messageBody}"?`,
-        steps: [
-          { id: '1', title: `Resolve contact ${recipient}`, actionType: 'resolve_contact', status: 'completed', verified: true },
-          { id: '2', title: 'Compose message draft', actionType: 'draft_message', status: 'completed', verified: true },
-          { id: '3', title: `Send message to ${recipient}`, actionType: 'send_whatsapp', status: 'pending', verified: false, details: messageBody },
-        ],
-        onConfirm: async () => {
-          appScanner.openExternalUrl(`https://api.whatsapp.com/send?text=${encodeURIComponent(messageBody)}`);
-        },
-      };
-      return {
-        isLocalCommand: true,
-        actionTaken: 'draft_whatsapp_message',
-        feedbackText: `${recipient}-এর জন্য মেসেজ রেডি করেছি জান। Confirm করো তাহলে পাঠাবো।`,
-        requiresConfirmation: true,
-        confirmationTask: task,
-      };
+    // WhatsApp message to a named contact —
+    // e.g. "WhatsApp-e amar baba-ke message koro je hi" /
+    //      "হোয়াটসঅ্যাপে আমার বাবাকে মেসেজ করো যে হাই" /
+    //      "send whatsapp message to baba saying hi"
+    // The real native flow (open app → find contact → type → send) runs on
+    // confirm, via the Android Agent's accessibility automation.
+    const isWhatsAppCmd = /(whatsapp|হোয়াটসঅ্যাপ|হোয়াটসঅ্যাপে|হোয়াটসএপ|হোয়াটস্যাপ|wp\b)/i.test(text);
+    const hasMsgIntent =
+      /(message|msg|মেসেজ|মেসেজটা|text)/i.test(text) &&
+      /(koro|karo|kor\b|bhejo|pathao|পাঠাও|দাও|dao|send|লিখো|likho|লিখে)/i.test(text);
+    if (isWhatsAppCmd && hasMsgIntent) {
+      let recipient = '';
+      let body = '';
+      const rm =
+        text.match(/(.+?)\s*(?:কে|ke|ko)\s*(?:মেসেজ|message|msg|মেসেজটা)/i) ||
+        text.match(/(?:to|for)\s+(.+?)\s*(?:saying|that|bolke|বলে|যে|message|মেসেজ)/i) ||
+        text.match(/(?:send|bhejo|pathao|পাঠাও|message)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?(?:to\s+)?(.+?)\s*(?:saying|that|bolke|বলে|যে)/i);
+      if (rm) recipient = rm[1];
+      recipient = (recipient || '')
+        .replace(/whatsapp|হোয়াটসঅ্যাপে|হোয়াটসঅ্যাপ|হোয়াটসএপ|হোয়াটস্যাপ|wp/gi, ' ')
+        .replace(/\b(amar|aamar|amr|my|আমার|tomar|তোমার)\b/gi, ' ')
+        .replace(/\b(ke|ko|কে)\b/g, ' ')
+        .replace(/^(?:e|me|te|may|the|a)\s+/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const bm = text.match(/(?:যে|je|j[ae]\b|that|bolke|saying|বলে|বলো)\s*[:\-]?\s*["']?(.+?)["']?\s*$/i);
+      if (bm) body = bm[1].trim();
+      if (!body) body = 'hi';
+
+      if (recipient) {
+        const task: ActiveTask = {
+          id: `task_${Date.now()}`,
+          goal: `Send WhatsApp message to ${recipient}`,
+          status: 'waiting-confirmation',
+          currentStepIndex: 0,
+          confirmationPrompt: `${recipient}-কে WhatsApp-এ "${body}" মেসেজটা পাঠাবো?`,
+          steps: [
+            { id: '1', title: `Open WhatsApp & find ${recipient}`, actionType: 'resolve_contact', status: 'completed', verified: true },
+            { id: '2', title: `Type "${body}"`, actionType: 'draft_message', status: 'completed', verified: true },
+            { id: '3', title: `Send to ${recipient}`, actionType: 'send_whatsapp', status: 'pending', verified: false, details: body },
+          ],
+          onConfirm: async () => {
+            // Real native flow: WhatsApp → search contact → type → Send.
+            if (Capacitor.isNativePlatform() && (await androidAgent.isAccessibilityEnabled())) {
+              await androidAgent.whatsappMessage(recipient, body);
+            } else {
+              // Fallback: open WhatsApp with the text prefilled.
+              appScanner.openExternalUrl(`https://wa.me/?text=${encodeURIComponent(body)}`);
+            }
+          },
+        };
+        return {
+          isLocalCommand: true,
+          actionTaken: 'draft_whatsapp_message',
+          feedbackText: `${recipient}-কে WhatsApp-এ "${body}" পাঠাবো জান। Confirm করো।`,
+          requiresConfirmation: true,
+          confirmationTask: task,
+        };
+      }
     }
 
     const callMatch = text.match(/(?:call|phone|ring|কল করো)\s+([a-z0-9\s]+)/i);

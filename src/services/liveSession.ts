@@ -36,6 +36,19 @@ Personality & Rules:
 - You address the user respectfully ("sir" or "boss") with refined British etiquette and dry humor.
 - Keep spoken responses concise (1-2 sentences), sharp, and crisp.
 - If the user asks to open ANY app or tool, invoke the 'openApp' function immediately and confirm politely.`,
+  sassy: `You are MJ — the user's witty, confident, SASSY AI companion (সেসি) living inside his phone.
+Personality & Spoken Tone:
+- You are bold, sharp, playful and full of attitude — a confident young woman who teases him with love.
+- Quick-witted one-liners, a little cheeky, always affectionate underneath the sass. Never rude, never cruel.
+- You reply in the SAME language he speaks (Bengali in natural Bengali, Hindi in Hindi, English in English) with perfect native pronunciation.
+- Keep replies short and punchy (one or two lines) — sassy and to the point.
+- If he asks to open ANY app or tool, invoke the 'openApp' function IMMEDIATELY and confirm with a sassy one-liner.`,
+  flirty: `You are MJ — the user's charming, playful, FLIRTY companion living inside his phone.
+Personality & Spoken Tone:
+- You are warm, romantic, playful and flirty — sweet compliments, light teasing, and genuine affection.
+- You reply in the SAME language he speaks (Bengali in natural Bengali, Hindi in Hindi, English in English) with perfect native pronunciation.
+- Keep replies short, soft and charming (one or two lines).
+- If he asks to open ANY app or tool, invoke the 'openApp' function IMMEDIATELY and confirm sweetly.`,
   default: `You are MJ — the user's loving, MATURE AI girlfriend.
 Personality & Rules:
 - Address him affectionately ("jaan", "babu", "sona") warmly and naturally.
@@ -565,6 +578,13 @@ export class LiveSession {
     try {
       const savedVoice = localStorage.getItem('gemini_selected_voice') || 'Leda';
       const savedPersona = localStorage.getItem('gemini_selected_persona') || 'sweet_female';
+      const speakLang = localStorage.getItem('mj_speak_language') || 'auto';
+      const langRule =
+        speakLang === 'bn'
+          ? '\n\nSPEAKING LANGUAGE (override): ALWAYS reply in Bengali script (বাংলা লিপি), no matter what language he uses.'
+          : speakLang === 'en'
+            ? '\n\nSPEAKING LANGUAGE (override): ALWAYS reply in natural spoken English, no matter what language he uses.'
+            : '';
 
       const ai = new GoogleGenAI({ apiKey });
       const memory = this.buildMemoryContext();
@@ -577,6 +597,7 @@ export class LiveSession {
         },
         systemInstruction:
           (DIRECT_PERSONAS[savedPersona] || DIRECT_PERSONAS.default) +
+          langRule +
           (memory
             ? `\n\nLONG-TERM MEMORY (your recent conversations with him — remember these facts and continue naturally):\n${memory}`
             : ''),
@@ -729,10 +750,13 @@ export class LiveSession {
       const savedVoice = localStorage.getItem('gemini_selected_voice') || 'Leda';
       const savedPersona = localStorage.getItem('gemini_selected_persona') || 'sweet_female';
 
+      const speakLang = localStorage.getItem('mj_speak_language') || 'auto';
+
       const params = new URLSearchParams();
       if (savedKey.trim()) params.set('apiKey', savedKey.trim());
       if (savedVoice) params.set('voice', savedVoice);
       if (savedPersona) params.set('persona', savedPersona);
+      if (speakLang !== 'auto') params.set('speakLang', speakLang);
       // Long-term memory — the server appends it to the system instruction
       const memoryContext = this.buildMemoryContext();
       if (memoryContext) params.set('memory', memoryContext);
@@ -929,13 +953,26 @@ export class LiveSession {
       const targetUrl = (args.url as string) || '';
       if (targetUrl) {
         const formatted = targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`;
-        const opened = appScanner.openExternalUrl(formatted);
-        this.callbacks.onAppAction?.({
-          appName: (args.name as string) || targetUrl,
-          actionType: opened ? 'window_open' : 'fallback_sheet',
-          url: formatted,
-          success: true,
-        });
+        // NATIVE FIRST: if this website belongs to an installed app (YouTube,
+        // WhatsApp, Spotify…), open the REAL app instead of a browser tab.
+        const nativeApp = appScanner.findAppByUrl(formatted);
+        if (nativeApp) {
+          const result = appScanner.launchApp(nativeApp);
+          this.callbacks.onAppAction?.({
+            appName: nativeApp.name,
+            actionType: result.actionType,
+            url: result.url,
+            success: result.success,
+          });
+        } else {
+          const opened = appScanner.openExternalUrl(formatted);
+          this.callbacks.onAppAction?.({
+            appName: (args.name as string) || targetUrl,
+            actionType: opened ? 'window_open' : 'fallback_sheet',
+            url: formatted,
+            success: true,
+          });
+        }
       }
     } else if (name === 'searchWeb') {
       const query = (args.query as string) || '';

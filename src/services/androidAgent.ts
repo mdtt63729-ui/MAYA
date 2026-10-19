@@ -193,6 +193,67 @@ class AndroidAgent {
     return { success: false, message: `${label} পাইনি জান।` };
   }
 
+  /**
+   * WhatsApp message to a named contact — the real native flow:
+   * launch WhatsApp → open search → type the contact → open the chat →
+   * type the message → tap Send. Runs on-device via the Accessibility Service.
+   */
+  public async whatsappMessage(contact: string, message: string): Promise<AgentResult> {
+    if (this.busy) return { success: false, message: 'already running' };
+    this.busy = true;
+    try {
+      const gate = await this.requireAccessibility();
+      if (!gate.ok) return { success: false, message: gate.msg };
+
+      this.report?.('WhatsApp খুলছি...');
+      const wa = appScanner.findApp('whatsapp');
+      if (!wa) return this.fail('WhatsApp খুঁজে পাইনি জান।');
+      appScanner.launchApp(wa);
+      await this.sleep(3000);
+
+      // 1. Open the search box (contentDescription "Search" / "Search or start new chat")
+      this.report?.(`${contact}-কে খুঁজছি...`);
+      let opened = await this.act({ action: 'click', matchDesc: 'search', timeoutMs: 6000 });
+      if (!opened?.success) {
+        opened = await this.act({ action: 'click', matchText: 'search', excludeEditable: true, timeoutMs: 3000 });
+      }
+      await this.sleep(1200);
+
+      // 2. Type the contact name into the search field
+      let typed = await this.act({ action: 'type', editable: true, value: contact, timeoutMs: 6000 });
+      if (!typed?.success) return this.fail('WhatsApp-এ সার্চ বক্স পাইনি জান।');
+      await this.sleep(1800);
+
+      // 3. Tap the matching contact row (excludeEditable so we don't re-tap the box)
+      let picked = await this.act({ action: 'click', matchText: contact, excludeEditable: true, timeoutMs: 6000 });
+      if (!picked?.success) {
+        picked = await this.act({ action: 'click', matchText: contact, timeoutMs: 4000 });
+      }
+      if (!picked?.success) return this.fail(`${contact}-কে WhatsApp-এ খুঁজে পাইনি জান।`);
+      await this.sleep(2000);
+
+      // 4. Type the message into the chat composer
+      this.report?.(`"${message}" লিখছি...`);
+      const msgTyped = await this.act({ action: 'type', editable: true, value: message, timeoutMs: 6000 });
+      if (!msgTyped?.success) return this.fail('মেসেজ লিখতে পারিনি জান।');
+      await this.sleep(1000);
+
+      // 5. Tap Send
+      let sent = await this.act({ action: 'click', matchDesc: 'send', timeoutMs: 5000 });
+      if (!sent?.success) sent = await this.act({ action: 'click', matchText: 'send', excludeEditable: true, timeoutMs: 3000 });
+      if (!sent?.success) {
+        return {
+          success: true,
+          message: 'মেসেজ লিখে দিয়েছি, কিন্তু Send বাটন পাইনি জান — একবার চেক করে পাঠিয়ে দাও।',
+        };
+      }
+      this.report?.(`${contact}-কে মেসেজ পাঠিয়ে দিয়েছি জান!`);
+      return { success: true, message: 'sent' };
+    } finally {
+      this.busy = false;
+    }
+  }
+
   // ------------------------------------------------------------------
   // Internals
   // ------------------------------------------------------------------

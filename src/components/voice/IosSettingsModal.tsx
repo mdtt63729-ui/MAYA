@@ -49,8 +49,12 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   const [selectedPersona, setSelectedPersona] = useState<string>('sweet_female');
 
   // Wake Word State
-  // MIC FIX: default OFF so the mic never auto-starts in the background.
-  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
+  // Wake-word listening defaults ON (matches the detector) so "Hey MJ" /
+  // "Hey Jarvis" / "Activate Friday" work hands-free.
+  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(true);
+
+  // Speaking language: auto (mirror the user) / Bengali / English
+  const [speakLang, setSpeakLang] = useState<string>('auto');
 
   // App Scanner State
   const [appSearch, setAppSearch] = useState<string>('');
@@ -87,6 +91,7 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
       setSelectedVoice(savedVoice);
       const savedPersona = localStorage.getItem('gemini_selected_persona') || 'sweet_female';
       setSelectedPersona(savedPersona);
+      setSpeakLang(localStorage.getItem('mj_speak_language') || 'auto');
       setWakeWordEnabled(wakeWordDetector.getStatus().isEnabled);
     }
   }, [isOpen]);
@@ -196,6 +201,12 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   const handlePersonaChange = (persona: string) => {
     setSelectedPersona(persona);
     localStorage.setItem('gemini_selected_persona', persona);
+  };
+
+  // Change Speaking Language
+  const handleSpeakLangChange = (lang: string) => {
+    setSpeakLang(lang);
+    localStorage.setItem('mj_speak_language', lang);
   };
 
   // Test Audio Speaker with Web Audio Tone
@@ -657,6 +668,33 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
                         >
                           <div className="font-semibold text-white">{p.name}</div>
                           <div className="text-[10px] text-slate-400">{p.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Speaking Language */}
+                  <div className="space-y-2">
+                    <span className="text-xs font-mono uppercase tracking-wider text-slate-300 font-bold">
+                      Speaking Language
+                    </span>
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      {[
+                        { id: 'auto', name: 'Auto', desc: 'Mirror me' },
+                        { id: 'bn', name: 'বাংলা', desc: 'Always Bangla' },
+                        { id: 'en', name: 'English', desc: 'Always English' },
+                      ].map((l) => (
+                        <button
+                          key={l.id}
+                          onClick={() => handleSpeakLangChange(l.id)}
+                          className={`p-2.5 rounded-xl border text-left transition-all ${
+                            speakLang === l.id
+                              ? 'bg-cyan-950/60 border-cyan-400 text-cyan-200'
+                              : 'bg-black/30 border-white/5 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <div className="font-semibold text-white">{l.name}</div>
+                          <div className="text-[10px] text-slate-400">{l.desc}</div>
                         </button>
                       ))}
                     </div>

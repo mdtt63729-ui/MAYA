@@ -5,7 +5,7 @@
  * Emits trigger event and plays a futuristic chime to start live session.
  */
 
-type WakeWordCallback = (keyword: string) => void;
+type WakeWordCallback = (keyword: string, persona: string) => void;
 
 interface IWindowWithSpeech extends Window {
   SpeechRecognition?: any;
@@ -30,28 +30,24 @@ export class WakeWordDetector {
     }
   };
 
-  // Recognized trigger phrases
-  private readonly wakeKeywords = [
-    'hey mj',
-    'mj',
-    'hey jarvis',
-    'jarvis',
-    'hey friday',
-    'friday',
-    'এমজে',
-    'জার্ভিস',
-    'ফ্রাইডে',
-    'ok mj',
-    'listen mj',
+  // Recognized trigger phrases → each maps to an assistant persona, so
+  // saying "Hey MJ", "Hey Jarvis", "Activate Friday" etc. activates the
+  // assistant AND switches to that persona. Order matters: the more specific
+  // personas are checked before the generic "mj".
+  private readonly wakePhrases: Array<{ persona: string; words: string[] }> = [
+    { persona: 'sassy', words: ['mj sassy', 'hey sassy', 'sassy', 'সেসি', 'স্যাসি'] },
+    { persona: 'flirty', words: ['hey flirty', 'flirty', 'ফ্লার্টি'] },
+    { persona: 'jarvis', words: ['hey jarvis', 'activate jarvis', 'jarvis on', 'jarvis', 'জার্ভিস', 'জারভিস'] },
+    { persona: 'friday', words: ['hey friday', 'activate friday', 'friday on', 'friday', 'ফ্রাইডে'] },
+    { persona: 'sweet_female', words: ['hey mj', 'activate mj', 'mj on', 'ok mj', 'listen mj', 'mj', 'এমজে'] },
   ];
 
   constructor() {
     const saved = localStorage.getItem('wake_word_enabled');
-    // MIC FIX: wake-word listening is now OFF by default. The mic must only
-    // turn on when the user taps the orb to activate MJ — not auto-start in
-    // the background (which caused the mic to flip on/off repeatedly).
-    // Users who want hands-free "Hey MJ" can still switch it on in Settings.
-    this.isEnabled = saved !== null ? saved === 'true' : false;
+    // Wake-word listening is ON by default so "Hey MJ" / "Hey Jarvis" /
+    // "Activate Friday" activate the assistant hands-free. Users who prefer
+    // tap-only activation can switch it off in Settings.
+    this.isEnabled = saved !== null ? saved === 'true' : true;
   }
 
   public init(callback: WakeWordCallback): boolean {
@@ -77,12 +73,14 @@ export class WakeWordDetector {
         for (let i = event.resultIndex; i < results.length; i++) {
           const transcript = results[i][0].transcript.trim().toLowerCase();
 
-          for (const keyword of this.wakeKeywords) {
-            if (transcript.includes(keyword)) {
-              console.log(`[Wake Word] Detected keyword: "${keyword}" from "${transcript}"`);
-              this.playWakeChime();
-              this.onWakeCallback?.(keyword);
-              return;
+          for (const group of this.wakePhrases) {
+            for (const word of group.words) {
+              if (transcript.includes(word)) {
+                console.log(`[Wake Word] Detected "${word}" → persona "${group.persona}" from "${transcript}"`);
+                this.playWakeChime();
+                this.onWakeCallback?.(word, group.persona);
+                return;
+              }
             }
           }
         }
