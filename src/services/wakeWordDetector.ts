@@ -44,10 +44,12 @@ export class WakeWordDetector {
 
   constructor() {
     const saved = localStorage.getItem('wake_word_enabled');
-    // Wake-word listening is ON by default so "Hey MJ" / "Hey Jarvis" /
-    // "Activate Friday" activate the assistant hands-free. Users who prefer
-    // tap-only activation can switch it off in Settings.
-    this.isEnabled = saved !== null ? saved === 'true' : true;
+    // MIC-FLAP FIX: wake-word listening is OFF by default. Always-on speech
+    // recognition makes Android cycle the mic indicator on/off continuously,
+    // which is the "mic bar bar on/off" the user reported. Tap the orb to
+    // activate. Users who want hands-free "Hey MJ" / "Hey Jarvis" /
+    // "Activate Friday" can switch it on in Settings (accepting the cycling).
+    this.isEnabled = saved !== null ? saved === 'true' : false;
   }
 
   public init(callback: WakeWordCallback): boolean {
@@ -164,6 +166,12 @@ export class WakeWordDetector {
       this.start();
     } else {
       this.stop();
+    }
+    // Let the app react (start/stop the native wake listener to match).
+    try {
+      window.dispatchEvent(new Event('mj-wake-toggle'));
+    } catch {
+      /* ignore */
     }
   }
 

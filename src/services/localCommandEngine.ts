@@ -67,18 +67,37 @@ class LocalCommandEngine {
       // Only treat as an app command when the target is short & app-like —
       // longer sentences go to the AI path (avoids false positives).
       if (target && target.split(/\s+/).length <= 4) {
-        const app = appScanner.findApp(target);
-        if (app && this.isLaunchable(app)) {
-          const result = appScanner.launchApp(app);
-          if (result.actionType === 'builtin') {
-            // Built-in web tools (camera overlay etc.) — let the AI path handle.
-            return null;
+        // Built-in interactive tools (camera overlay etc.) → let the AI path handle.
+        const known = appScanner.findApp(target);
+        if (known?.isBuiltInTool) return null;
+
+        if (Capacitor.isNativePlatform()) {
+          // Native fuzzy launch: opens ANY installed app by its real name, or
+          // honestly reports when the app is not on the phone.
+          const r = await appScanner.openAppSmart(target);
+          if (r.found) {
+            return {
+              isLocalCommand: true,
+              actionTaken: `open_app_${r.name}`,
+              feedbackText: `${r.name} খুলছি...`,
+              activeApp: r.name,
+            };
           }
           return {
             isLocalCommand: true,
-            actionTaken: `open_app_${app.name}`,
-            feedbackText: `${app.name} খুলছি...`,
-            activeApp: app.name,
+            actionTaken: 'app_not_found',
+            feedbackText: `${target} নামে কোনো অ্যাপ এই ফোনে নেই জান।`,
+          };
+        }
+
+        if (known && this.isLaunchable(known)) {
+          const result = appScanner.launchApp(known);
+          if (result.actionType === 'builtin') return null;
+          return {
+            isLocalCommand: true,
+            actionTaken: `open_app_${known.name}`,
+            feedbackText: `${known.name} খুলছি...`,
+            activeApp: known.name,
           };
         }
       }

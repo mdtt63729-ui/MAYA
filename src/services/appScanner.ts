@@ -371,6 +371,55 @@ export class AppScanner {
     return null;
   }
 
+  /**
+   * Smart app launch used by the voice agent.
+   * On Android it fuzzy-searches EVERY app actually installed on the phone
+   * (by display name) and launches the best match — so any installed app opens
+   * natively, not just the ones in the built-in registry. It returns whether an
+   * app was really opened, so the assistant can honestly say when one is not
+   * installed. Falls back to the static registry on the web.
+   */
+  public async openAppSmart(
+    query: string
+  ): Promise<{ found: boolean; actionType: string; name: string; url: string }> {
+    const q = (query || '').trim();
+    if (!q) return { found: false, actionType: 'app_not_found', name: q, url: '' };
+
+    // 1. NATIVE: search every installed app by display name and launch it.
+    if (Capacitor.isNativePlatform()) {
+      const MJNative = (Capacitor as any).Plugins?.MJNative;
+      if (MJNative?.openAppByName) {
+        try {
+          const r: any = await MJNative.openAppByName({ name: q });
+          if (r?.found) {
+            return { found: true, actionType: 'native_app_launch', name: r.label || q, url: '' };
+          }
+        } catch {
+          /* fall through to the registry */
+        }
+      }
+    }
+
+    // 2. Registry fallback (built-in tools, web, or when nothing matched).
+    const app = this.findApp(q);
+    if (app) {
+      if (app.isBuiltInTool) {
+        return { found: true, actionType: 'builtin', name: app.name, url: app.url };
+      }
+      const r = this.launchApp(app);
+      const openedNatively =
+        r.actionType === 'native_app_launch' ||
+        r.actionType === 'native_app_launch_dedupe' ||
+        r.actionType === 'native_intent';
+      // On the web a browser tab IS the correct result; on Android a browser
+      // fallback means the app wasn't actually found.
+      const found = openedNatively || (!Capacitor.isNativePlatform() && r.actionType === 'window_open');
+      return { found, actionType: r.actionType, name: app.name, url: r.url };
+    }
+
+    return { found: false, actionType: 'app_not_found', name: q, url: '' };
+  }
+
   /** Bengali-spoken app names → canonical registry ids. */
   private static readonly BENGALI_ALIASES: Record<string, string> = {
     'ইউটিউব': 'youtube',

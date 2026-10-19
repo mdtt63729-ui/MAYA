@@ -49,9 +49,9 @@ export const IosSettingsModal: React.FC<IosSettingsModalProps> = ({
   const [selectedPersona, setSelectedPersona] = useState<string>('sweet_female');
 
   // Wake Word State
-  // Wake-word listening defaults ON (matches the detector) so "Hey MJ" /
-  // "Hey Jarvis" / "Activate Friday" work hands-free.
-  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(true);
+  // Wake-word listening defaults OFF (matches the detector) to avoid the
+  // always-on mic cycling. Turn on for hands-free "Hey MJ" / "Hey Jarvis".
+  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(false);
 
   // Speaking language: auto (mirror the user) / Bengali / English
   const [speakLang, setSpeakLang] = useState<string>('auto');

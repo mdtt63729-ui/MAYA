@@ -198,6 +198,70 @@ jobs:
                   }
               }
 
+              /**
+               * Fuzzy-launch an installed app by its DISPLAY NAME.
+               * Searches every launcher activity on the phone and launches the
+               * best label match. Resolves { found, packageName, label } so the
+               * JS layer can open ANY real installed app (not just known ones)
+               * and honestly report when an app is not installed.
+               */
+              @PluginMethod
+              public void openAppByName(PluginCall call) {
+                  final String query = call.getString("name", "");
+                  if (query == null || query.trim().isEmpty()) {
+                      call.reject("name required");
+                      return;
+                  }
+                  Thread worker = new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          JSObject ret = new JSObject();
+                          try {
+                              PackageManager pm = getContext().getPackageManager();
+                              Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
+                              mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+                              List<ResolveInfo> activities = pm.queryIntentActivities(mainIntent, 0);
+                              String q = query.toLowerCase().trim();
+                              ResolveInfo best = null;
+                              int bestScore = 0;
+                              for (ResolveInfo ri : activities) {
+                                  try {
+                                      String label = ri.loadLabel(pm).toString().toLowerCase();
+                                      String pkg = ri.activityInfo.packageName.toLowerCase();
+                                      int score = 0;
+                                      if (label.equals(q)) score = 100;
+                                      else if (label.startsWith(q)) score = 80;
+                                      else if (label.contains(q)) score = 60;
+                                      else if (pkg.contains(q)) score = 40;
+                                      if (score > bestScore) { bestScore = score; best = ri; }
+                                  } catch (Exception ignored) {
+                                  }
+                              }
+                              if (best != null && bestScore > 0) {
+                                  Intent launch = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
+                                  if (launch != null) {
+                                      launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                      getContext().startActivity(launch);
+                                      ret.put("found", true);
+                                      ret.put("packageName", best.activityInfo.packageName);
+                                      ret.put("label", best.loadLabel(pm).toString());
+                                  } else {
+                                      ret.put("found", false);
+                                  }
+                              } else {
+                                  ret.put("found", false);
+                              }
+                          } catch (Exception e) {
+                              ret.put("found", false);
+                              ret.put("error", e.getMessage());
+                          }
+                          call.resolve(ret);
+                      }
+                  });
+                  worker.setName("mj-open-app");
+                  worker.start();
+              }
+
               @PluginMethod
               public void openUrl(PluginCall call) {
                   String url = call.getString("url");
@@ -1410,6 +1474,14 @@ jobs:
               s = s.replace(
                   "<uses-permission",
                   '<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />\n            <uses-permission',
+                  1,
+              )
+          # Android 11+ hides installed apps from queryIntentActivities unless
+          # the app declares visibility. This lets MJ see EVERY installed app.
+          if "QUERY_ALL_PACKAGES" not in s:
+              s = s.replace(
+                  "<uses-permission",
+                  '<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />\n    <uses-permission',
                   1,
               )
           if "MJOverlayService" not in s:

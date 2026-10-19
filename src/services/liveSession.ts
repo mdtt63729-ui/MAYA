@@ -691,7 +691,7 @@ export class LiveSession {
     const functionCalls = message?.toolCall?.functionCalls;
     if (Array.isArray(functionCalls) && functionCalls.length > 0) {
       for (const call of functionCalls) {
-        this.handleToolCall({ id: call.id, name: call.name, args: call.args });
+        void this.handleToolCall({ id: call.id, name: call.name, args: call.args });
       }
     }
   }
@@ -826,7 +826,7 @@ export class LiveSession {
 
           // 5. Function Calling (openApp, openWebsite, searchWeb, etc.)
           if (data.toolCall) {
-            this.handleToolCall(data.toolCall);
+            void this.handleToolCall(data.toolCall);
           }
 
           // 6. Server error notification
@@ -913,7 +913,7 @@ export class LiveSession {
   /**
    * Execute application or browser tool action and return acknowledgment to server
    */
-  private handleToolCall(toolCall: ToolCallPayload): void {
+  private async handleToolCall(toolCall: ToolCallPayload): Promise<void> {
     const { name, args } = toolCall;
     this.callbacks.onToolCall?.(toolCall);
 
@@ -926,29 +926,22 @@ export class LiveSession {
       }, 5000);
     }
 
+    let resultText = `Action ${name} done.`;
+
     if (name === 'openApp') {
       const appNameQuery = (args.appName as string) || '';
-      const matchedApp = appScanner.findApp(appNameQuery);
-
-      if (matchedApp) {
-        const result = appScanner.launchApp(matchedApp);
-        this.callbacks.onAppAction?.({
-          appName: matchedApp.name,
-          actionType: result.actionType,
-          url: result.url,
-          success: result.success,
-        });
-      } else {
-        // App NOT found — NEVER fall back to a web/Google search. The user
-        // wants the real native app; opening a website instead is wrong.
-        // Report honestly so MJ can say she couldn't find it.
-        this.callbacks.onAppAction?.({
-          appName: appNameQuery,
-          actionType: 'app_not_found',
-          url: '',
-          success: false,
-        });
-      }
+      // Smart launch: on Android this fuzzy-searches the phone's REAL installed
+      // apps and opens the best match; it reports honestly when none exists.
+      const r = await appScanner.openAppSmart(appNameQuery);
+      this.callbacks.onAppAction?.({
+        appName: r.name || appNameQuery,
+        actionType: r.actionType,
+        url: r.url,
+        success: r.found,
+      });
+      resultText = r.found
+        ? `Opened "${r.name}" on the phone.`
+        : `The app "${appNameQuery}" is NOT installed on this phone. Tell the user honestly, in your own persona voice and language, that you could not find that app on their phone.`;
     } else if (name === 'openWebsite') {
       const targetUrl = (args.url as string) || '';
       if (targetUrl) {
@@ -964,6 +957,7 @@ export class LiveSession {
             url: result.url,
             success: result.success,
           });
+          resultText = `Opened ${nativeApp.name}.`;
         } else {
           const opened = appScanner.openExternalUrl(formatted);
           this.callbacks.onAppAction?.({
@@ -972,6 +966,7 @@ export class LiveSession {
             url: formatted,
             success: true,
           });
+          resultText = `Opened ${formatted} in the browser.`;
         }
       }
     } else if (name === 'searchWeb') {
@@ -985,10 +980,12 @@ export class LiveSession {
           url: searchUrl,
           success: true,
         });
+        resultText = `Searched the web for "${query}".`;
       }
     }
 
-    // Send immediate confirmation back (server relay or direct session)
+    // Send the REAL outcome back so the assistant reports it truthfully
+    // (previously it always claimed success, even when nothing was opened).
     if (this.isDirectMode && this.directSession) {
       this.directSession
         .sendToolResponse({
@@ -996,7 +993,7 @@ export class LiveSession {
             {
               id: toolCall.id,
               name: toolCall.name,
-              response: { result: `Executed action ${name} successfully.` },
+              response: { result: resultText },
             },
           ],
         })
@@ -1007,7 +1004,7 @@ export class LiveSession {
           toolResponse: {
             id: toolCall.id,
             name: toolCall.name,
-            result: `Executed action ${name} successfully`,
+            result: resultText,
           },
         })
       );

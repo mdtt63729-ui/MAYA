@@ -117,6 +117,8 @@ export default function App() {
   // never fights the session's microphone.
   const startNativeWake = useCallback(() => {
     if (!useNativeWakeRef.current || !Capacitor.isNativePlatform()) return;
+    // Never listen unless the user actually enabled wake word.
+    if (!wakeWordDetector.getStatus().isEnabled) return;
     const MJNative = (Capacitor as any).Plugins?.MJNative;
     if (!MJNative?.startOfflineListening || nativeWakeListenerRef.current) return;
     const lang = localStorage.getItem('mj_offline_stt_lang') || 'en-IN';
@@ -161,6 +163,27 @@ export default function App() {
       stopNativeWake();
     };
   }, [handleWake, startNativeWake, stopNativeWake]);
+
+  // Keep the native wake listener in sync with the wake-word toggle and with
+  // app visibility — it must never listen in the background or while a live
+  // session owns the mic (that is what caused the mic to flip on/off).
+  useEffect(() => {
+    const syncWake = () => {
+      const shouldListen =
+        useNativeWakeRef.current &&
+        wakeWordDetector.getStatus().isEnabled &&
+        liveSession.getState() === 'disconnected' &&
+        document.visibilityState === 'visible';
+      if (shouldListen) startNativeWake();
+      else stopNativeWake();
+    };
+    window.addEventListener('mj-wake-toggle', syncWake);
+    document.addEventListener('visibilitychange', syncWake);
+    return () => {
+      window.removeEventListener('mj-wake-toggle', syncWake);
+      document.removeEventListener('visibilitychange', syncWake);
+    };
+  }, [startNativeWake, stopNativeWake]);
 
   // Scan and index apps on initial boot
   useEffect(() => {
